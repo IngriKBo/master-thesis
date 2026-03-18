@@ -16,6 +16,7 @@ from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
 ## IMPORT AST RELATED TOOLS
 from stable_baselines3 import SAC
 from stable_baselines3.sac import MlpPolicy, MultiInputPolicy
+from stable_baselines3.common.callbacks import BaseCallback
 from gymnasium.wrappers import FlattenObservation, RescaleAction
 from gymnasium.utils.env_checker import check_env
 
@@ -26,8 +27,29 @@ import os
 import time
 
 ### IMPORT UTILS
-from utils.get_path import get_saved_model_path
+from utils.get_path import get_trained_model_and_log_path
+from utils.logger import log_ast_training_config
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+
+
+class PercentProgressCallback(BaseCallback):
+    """Print training progress in percent."""
+    def __init__(self, total_timesteps: int, print_every_pct: int = 1):
+        super().__init__()
+        self.total_timesteps = max(1, int(total_timesteps))
+        self.print_every_pct = max(1, int(print_every_pct))
+        self._last_printed_pct = -1
+
+    def _on_training_start(self) -> None:
+        print(f"Training progress: 0% (0/{self.total_timesteps})", flush=True)
+
+    def _on_step(self) -> bool:
+        pct = int(100 * self.num_timesteps / self.total_timesteps)
+        pct = max(0, min(100, pct))
+        if pct >= self._last_printed_pct + self.print_every_pct:
+            print(f"Training progress: {pct}% ({self.num_timesteps}/{self.total_timesteps})", flush=True)
+            self._last_printed_pct = pct
+        return True
 
 
 def parse_cli_args():
@@ -57,8 +79,14 @@ def parse_cli_args():
                         help='AST: number of simulation episode counts (default: 1)')
     parser.add_argument('--warm_up_time', type=int, default=2500, metavar='WARM_UP_TIME',
                         help='AST: time needed in second before policy - action sampling takes place (default: 1500)')
-    parser.add_argument('--action_sampling_period', type=int, default=1800, metavar='ACT_SAMPLING_PERIOD',
-                        help='AST: time period in second between policy - action sampling (default: 1800)')
+    parser.add_argument('--action_sampling_period', type=int, default=900, metavar='ACT_SAMPLING_PERIOD',
+                        help='AST: time period in second between policy - action sampling (default: 900)')
+    parser.add_argument('--total_steps', type=int, default=15000, metavar='TOTAL_STEPS',
+                        help='AST: total training timesteps (default: 15000)')
+    parser.add_argument('--strict_env_check', action='store_true',
+                        help='AST: abort training if gym check_env fails (default: continue with warning)')
+    parser.add_argument('--model_name', type=str, default='AST-observer-train', metavar='MODEL_NAME',
+                        help='AST: base name for this training run folder under trained_model (default: AST-observer-train)')
 
     # Parse args
     args = parser.parse_args()
@@ -71,18 +99,38 @@ if __name__ == "__main__":
 
     # Get the args
     args = parse_cli_args()
+
+    # Create unique output paths under trained_model/
+    model_name = args.model_name
+    model_path, log_path, tb_path = get_trained_model_and_log_path(root=ROOT, model_name=model_name)
     
     # Get the assets and AST Environment Wrapper
-    env, assets, map_gdfs = get_env_assets(args=args)
+    env, assets, map_gdfs = get_env_assets(args=args, scenario='observer')
+
+    # Hard safety check so we never train wrong scenario by accident
+    if type(env).__name__ != "SeaEnvObserverAST":
+        raise RuntimeError(f"Wrong environment selected: {type(env).__name__}. Expected SeaEnvObserverAST.")
+    if env.assets[0].ship_model.observer is None:
+        raise RuntimeError("Observer is not attached to ship model. Aborting observer-scenario training.")
+
+    print(f"Training environment: {type(env).__name__}")
+    print(f"Model save path    : {model_path}.zip")
+    print(f"Run log path       : {log_path}.txt")
+    print(f"TensorBoard path   : {tb_path}")
     
-    # Check the env if falid
+    # Check env sanity. This simulator is stochastic, so deterministic-check may fail.
     try:
         check_env(env)
         print("Environment passes all chekcs!")
     except Exception as e:
         print(f"Environment has issues: {e}")
-        print("ABORT TRAINING")
-        sys.exit(1)  # non-zero exit code stops the script
+        if args.strict_env_check:
+            print("ABORT TRAINING (strict env check enabled)")
+            sys.exit(1)  # non-zero exit code stops the script
+        print("Continuing training (strict env check disabled).")
+
+    # Log config + actual env class to file
+    log_ast_training_config(args=args, txt_path=log_path, env=env, also_print=True)
     
     # Set the Policy
     # Later
@@ -110,7 +158,7 @@ if __name__ == "__main__":
                     sde_sample_freq=-1,
                     use_sde_at_warmup=False,
                     stats_window_size=100,
-                    tensorboard_log=None,
+                    tensorboard_log=tb_path,
                     policy_kwargs=None,
                     verbose=1,
                     seed=None,
@@ -118,15 +166,15 @@ if __name__ == "__main__":
     
     # Train the RL model. Record the time
     start_time = time.time()
-    ast_model.learn(total_timesteps=15_000)
+    progress_cb = PercentProgressCallback(total_timesteps=args.total_steps, print_every_pct=1)
+    ast_model.learn(total_timesteps=args.total_steps, callback=progress_cb)
     elapsed_time = time.time() - start_time
     minutes, seconds = divmod(elapsed_time, 60)
     hours, _         = divmod(minutes, 60)
     train_time = (hours, minutes, seconds)
     
     # Save the trained model
-    saved_model_path = get_saved_model_path(root=ROOT, saved_model_filename="AST-train_3")
-    ast_model.save(saved_model_path)
+    ast_model.save(model_path)
 
 ################################## LOAD THE TRAINED MODEL ##################################
 
@@ -134,7 +182,7 @@ if __name__ == "__main__":
     del ast_model
     
     # Load the trained model
-    ast_model = SAC.load(saved_model_path)
+    ast_model = SAC.load(model_path)
     
     ## Run the trained model
     obs, info = env.reset()
@@ -149,11 +197,14 @@ if __name__ == "__main__":
 
     # Print RL transition
     env.log_RL_transition_text(train_time=train_time,
-                           txt_path=None,
+                           txt_path=log_path,
                            also_print=True)
     
     # Print training time
     print(f"Training is done in {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds.")
+    print(f"Saved model        : {model_path}.zip")
+    print(f"Saved run log      : {log_path}.txt")
+    print(f"Saved TensorBoard  : {tb_path}")
 
     ## Get the simulation results for all assets, and plot the asset simulation results
     own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)

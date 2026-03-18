@@ -7,7 +7,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 ### IMPORT SIMULATOR ENVIRONMENTS
-from env_wrappers.sea_env_ast_v1.env import AssetInfo, ShipAsset, SeaEnvAST
+from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
+from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
+from env_wrappers.sea_env_ast_v1.env import SeaEnvAST
 
 from simulator.ship_in_transit.sub_systems.ship_model import  ShipConfiguration, SimulationConfiguration, ShipModel
 from simulator.ship_in_transit.sub_systems.ship_engine import MachinerySystemConfiguration, MachineryMode, MachineryModeParams, MachineryModes, SpecificFuelConsumptionBaudouin6M26Dot3, SpecificFuelConsumptionWartila6L26, RudderConfiguration
@@ -17,6 +19,7 @@ from simulator.ship_in_transit.sub_systems.controllers import ThrottleController
 from simulator.ship_in_transit.sub_systems.wave_model import WaveModelConfiguration
 from simulator.ship_in_transit.sub_systems.current_model import CurrentModelConfiguration
 from simulator.ship_in_transit.sub_systems.wind_model import WindModelConfiguration
+from simulator.ship_in_transit.sub_systems.observers import ShipObserverEKF
 
 ## IMPORT FUNCTIONS
 from utils.get_path import get_ship_route_path, get_map_path
@@ -28,7 +31,34 @@ import numpy as np
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
-def get_env_assets(args, print_ship_status=False):
+# ============================================
+# Environment Scenarios Registry
+# Add new scenarios here as key-value pairs
+# ============================================
+ENVIRONMENT_SCENARIOS = {
+    'observer': SeaEnvObserverAST,
+    'wave': SeaEnvAST,
+    # Add more scenarios here: 'scenario_name': EnvironmentClass
+}
+
+def get_env_assets(args, print_ship_status=False, scenario='observer'):
+    """
+    Get environment and assets for training/simulation.
+    
+    Args:
+        args: Command line arguments
+        print_ship_status: Whether to print ship status (bool)
+        scenario: Environment scenario name - 'observer' or 'wave' (str)
+    
+    Returns:
+        env, assets, map_gdfs
+    """
+    
+    # Validate scenario
+    if scenario not in ENVIRONMENT_SCENARIOS:
+        raise ValueError(f"Unknown scenario '{scenario}'. Available: {list(ENVIRONMENT_SCENARIOS.keys())}")
+    
+    env_class = ENVIRONMENT_SCENARIOS[scenario]
 
     # -----------------------
     # GPKG settings (edit if your layer names differ)
@@ -213,6 +243,22 @@ def get_env_assets(args, print_ship_status=False):
         colav_mode='sbmpc',
         print_status=print_ship_status
     )
+
+    # Attach EKF observer when training/evaluating observer scenario
+    if scenario == 'observer':
+        own_ship.observer = ShipObserverEKF(
+            dt=own_ship.int.dt,
+            x0=np.array([
+                own_ship.north,
+                own_ship.east,
+                own_ship.yaw_angle,
+                own_ship.forward_speed,
+                own_ship.sideways_speed,
+                own_ship.yaw_rate
+            ], dtype=float)
+        )
+        own_ship.use_observer_for_control = True
+
     own_ship_info = AssetInfo(
         # dynamic state (mutable)
         current_north       = own_ship.north,
@@ -238,7 +284,8 @@ def get_env_assets(args, print_ship_status=False):
     ################################### ENV SPACE ###################################
 
     # Initiate Multi-Ship Reinforcement Learning Environment Class Wrapper
-    env = SeaEnvAST(
+    # Use the selected scenario environment
+    env = env_class(
         assets=assets,
         map=map,
         wave_model_config=wave_model_config,
