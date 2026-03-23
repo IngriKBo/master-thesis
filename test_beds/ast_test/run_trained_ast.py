@@ -75,7 +75,7 @@ if __name__ == "__main__":
     env, assets, map_gdfs = get_env_assets(args=args, print_ship_status=True)
     
     # Load the trained model
-    saved_model_path = get_saved_model_path(root=ROOT, saved_model_filename="AST-train_2")
+    saved_model_path = get_saved_model_path(root=ROOT, saved_model_filename="AST-train_3")
     
     # Load the trained model
     ast_model = SAC.load(saved_model_path)

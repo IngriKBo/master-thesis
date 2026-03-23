@@ -81,12 +81,12 @@ def parse_cli_args():
                         help='AST: time needed in second before policy - action sampling takes place (default: 1500)')
     parser.add_argument('--action_sampling_period', type=int, default=900, metavar='ACT_SAMPLING_PERIOD',
                         help='AST: time period in second between policy - action sampling (default: 900)')
-    parser.add_argument('--total_steps', type=int, default=15000, metavar='TOTAL_STEPS',
-                        help='AST: total training timesteps (default: 15000)')
+    parser.add_argument('--total_steps', type=int, default=25000, metavar='TOTAL_STEPS',
+                        help='AST: total training timesteps (default: 25000)')
     parser.add_argument('--strict_env_check', action='store_true',
                         help='AST: abort training if gym check_env fails (default: continue with warning)')
-    parser.add_argument('--model_name', type=str, default='AST-observer-train', metavar='MODEL_NAME',
-                        help='AST: base name for this training run folder under trained_model (default: AST-observer-train)')
+    parser.add_argument('--model_name', type=str, default='AST-observer-train-realistic', metavar='MODEL_NAME',
+                        help='AST: base name for this training run folder under trained_model (default: AST-observer-train-realistic)')
 
     # Parse args
     args = parser.parse_args()
