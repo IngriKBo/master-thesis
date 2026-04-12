@@ -85,6 +85,7 @@ WATER_LAYER = "water_3857"               # optional
 frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf = get_gdf_from_gpkg(GPKG_PATH, FRAME_LAYER, OCEAN_LAYER, LAND_LAYER, COAST_LAYER, WATER_LAYER)
 map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
 
+# --- Kartdata: bruk (east, north) direkte til PolygonObstacle ---
 map_data = get_polygon_from_gdf(land_gdf)   # list of exterior rings (E,N)
 map = [PolygonObstacle(map_data), frame_gdf]              # <-- reuse your existing simulator map type
 
@@ -202,26 +203,10 @@ machinery_config = MachinerySystemConfiguration(
 
 ### CONFIGURE THE SHIP SIMULATION MODELS
 ## Own ship
-own_ship_route_filename = 'own_ship_route.txt'
-own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
-
-start_E, start_N = np.loadtxt(own_ship_route_name)[0]  # expecting two columns: east, north
-
-own_ship_config = SimulationConfiguration(
-    initial_north_position_m=start_E,
-    initial_east_position_m=start_N,
-    initial_yaw_angle_rad=np.deg2rad(-60.0),
-    initial_forward_speed_m_per_s=0.0,
-    initial_sideways_speed_m_per_s=0.0,
-    initial_yaw_rate_rad_per_s=0.0,
-    integration_step=args.time_step,
-    simulation_time=20000,
-)
-# Set the throttle and autopilot controllers for the own ship
+# --- Set up route and controllers ---
 own_ship_throttle_controller_gains = ThrottleControllerGains(
    kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001
 )
-
 own_ship_heading_controller_gains = HeadingControllerGains(kp=1.5, kd=75, ki=0.005)
 own_ship_los_guidance_parameters = LosParameters(
     radius_of_acceptance=args.radius_of_acceptance,
@@ -233,6 +218,30 @@ own_ship_desired_speed = 4.0
 own_ship_cross_track_error_tolerance = 750
 own_ship_initial_propeller_shaft_speed = 0
 own_ship_initial_propeller_shaft_acceleration = 0
+
+
+
+# --- Load route and assign east/north correctly ---
+own_ship_route_filename = 'Stangvik_AST_reversed.txt'
+own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
+route_data = np.loadtxt(own_ship_route_name)  # expecting two columns: east, north
+# route_data[:,0] = east, route_data[:,1] = north
+start_E = route_data[0, 0]
+start_N = route_data[0, 1]
+own_ship_config = SimulationConfiguration(
+        initial_north_position_m=start_N,  # north from route file
+        initial_east_position_m=start_E,   # east from route file
+        initial_yaw_angle_rad=np.deg2rad(-60.0),
+        initial_forward_speed_m_per_s=0.0,
+        initial_sideways_speed_m_per_s=0.0,
+        initial_yaw_rate_rad_per_s=0.0,
+        integration_step=args.time_step,
+        simulation_time=20000,
+)
+
+# --- Instantiate ShipModel (auto_pilot will process the route) ---
+
+# --- Instantiate ShipModel (auto_pilot will process the route) ---
 own_ship = ShipModel(
     ship_config=ship_config,
     simulation_config=own_ship_config,
@@ -256,7 +265,14 @@ own_ship = ShipModel(
     print_status=True
 )
 
+# --- Ensure autopilot waypoints are set as east/north ---
+if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
+    own_ship.auto_pilot.navigate.east = route_data[:, 0].tolist()
+    own_ship.auto_pilot.navigate.north = route_data[:, 1].tolist()
+
+
 # Attach observer to own ship only
+# Q og R brukes for tuning, ikke for tilfeldig støy
 own_ship.observer = ShipObserverEKF(
     dt=own_ship.int.dt,
     x0=np.array([
@@ -266,9 +282,16 @@ own_ship.observer = ShipObserverEKF(
         own_ship.forward_speed,
         own_ship.sideways_speed,
         own_ship.yaw_rate
-    ], dtype=float)
+    ], dtype=float),
+    P0=np.eye(6)*1e-3
 )
-own_ship.use_observer_for_control = False
+# Sett eksplisitt måle-støy (std) på observeren: [north, east, yaw, speed]
+# Realistisk støy (std):
+#   - Posisjon: 1–5 meter (f.eks. GPS typisk 2–3 m std)
+#   - Yaw: 0.01–0.05 rad (0.5–3 grader)
+#   - Fart: 0.05–0.2 m/s (Doppler logg, GPS)
+own_ship.observer.measurement_noise_std = np.array([0, 0, 0, 0])  # Juster etter behov
+own_ship.use_observer_for_control = True  # Nå bruker ColAV observerens (støyete) signaler
 
 own_ship_info = AssetInfo(
     # dynamic state (mutable)
@@ -295,6 +318,7 @@ assets: List[ShipAsset] = [own_ship_asset]
 ################################### ENV SPACE ###################################
 
 # Initiate Multi-Ship Reinforcement Learning Environment Class Wrapper
+
 env = SeaEnvObserverAST(
     assets=assets,
     map=map,
@@ -306,11 +330,25 @@ env = SeaEnvObserverAST(
     include_wind=True,
     include_current=True)
 
+# --- DEBUG: Print map boundaries and initial position ---
+poly_map = map[0]
+print("[DEBUG] Map boundaries:")
+print(f"  min_north: {poly_map.min_north}")
+print(f"  max_north: {poly_map.max_north}")
+print(f"  min_east:  {poly_map.min_east}")
+print(f"  max_east:  {poly_map.max_east}")
+init_ship = own_ship
+print("[DEBUG] Initial ship position:")
+print(f"  north: {init_ship.north}")
+print(f"  east:  {init_ship.east}")
+
+# Posisjon er riktig her
+
 # Load trained model
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
-    model_load_path = str(ROOT / "trained_model" / "AST-observer-train_2026-03-18_11-06-13_511b" / "model")
+    model_load_path = str(ROOT / "trained_model" / "AST-observer-train_2026-03-18_11-06-13_511b" / "model.zip")
 
 model = SAC.load(model_load_path)
 
@@ -342,6 +380,7 @@ while True:
         print(f"Step {step_idx}: No observer tuning recorded.")
     step_idx += 1
     if terminated or truncated:
+        print(f"[DEBUG] Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}")
         break
 
 ################################## GET RESULTS ##################################
@@ -371,18 +410,44 @@ animate_side_by_side(map_anim.fig, polar_anim.fig,
                      show=False)
 
 # Plot 1: Trajectory + observer plots
+
+# --- DEBUG: Print east/north values before plotting ---
+print("[DEBUG] First 5 east positions:", own_ship_results_df["east position [m]"].head().to_list())
+print("[DEBUG] First 5 north positions:", own_ship_results_df["north position [m]"].head().to_list())
+print("[DEBUG] Last 5 east positions:", own_ship_results_df["east position [m]"].tail().to_list())
+print("[DEBUG] Last 5 north positions:", own_ship_results_df["north position [m]"].tail().to_list())
+if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
+    print("[DEBUG] Waypoints (east):", getattr(own_ship.auto_pilot.navigate, 'east', []))
+    print("[DEBUG] Waypoints (north):", getattr(own_ship.auto_pilot.navigate, 'north', []))
+
 plot_ship_status(own_ship_asset, own_ship_results_df, plot_env_load=True, show=False)
 
 # Plot 2: Status plot
+
+# --- DEBUG: Print values to be plotted for ship trajectory ---
+east_vals = own_ship_results_df["east position [m]"].to_numpy()
+north_vals = own_ship_results_df["north position [m]"].to_numpy()
+print("[DEBUG] Trajectory east (min, max):", np.min(east_vals), np.max(east_vals))
+print("[DEBUG] Trajectory north (min, max):", np.min(north_vals), np.max(north_vals))
+print("[DEBUG] Trajectory east (first 5):", east_vals[:5])
+print("[DEBUG] Trajectory north (first 5):", north_vals[:5])
+print("[DEBUG] Trajectory east (last 5):", east_vals[-5:])
+print("[DEBUG] Trajectory north (last 5):", north_vals[-5:])
+
 plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=False)
 
 
 # --- Plot observer tuning over time ---
 
-
 import matplotlib.pyplot as plt
-observer_tuning_history = np.array(observer_tuning_history)
-observer_tuning_times = np.array(observer_tuning_times)
+# Use full observer tuning history if available (logs every sim timestep)
+if hasattr(env, 'observer_tuning_full_history') and len(env.observer_tuning_full_history) > 0:
+    observer_tuning_history = np.array(env.observer_tuning_full_history)
+    observer_tuning_times = np.array(env.observer_tuning_full_times)
+else:
+    observer_tuning_history = np.array(observer_tuning_history)
+    observer_tuning_times = np.array(observer_tuning_times)
+
 if observer_tuning_history.shape[0] > 0:
     plt.figure(figsize=(10, 5))
     plt.step(observer_tuning_times, observer_tuning_history[:,0], where='post', label='alpha_r_pos')
@@ -393,9 +458,28 @@ if observer_tuning_history.shape[0] > 0:
     plt.xlabel('Simulation time [s]')
     plt.ylabel('Observer tuning (scaling)')
     plt.title('Observer tuning over time (RL agent)')
-    plt.ylim(0.4, 2.1)
     plt.legend()
     plt.grid(True)
+
+# --- Plot induced measurement noise (observer), delt opp i posisjon og fart ---
+observer = env.assets[0].ship_model.observer
+if hasattr(observer, 'induced_noise_log') and len(observer.induced_noise_log) > 0:
+    induced_noise = np.array(observer.induced_noise_log)
+    fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    # Posisjon
+    axs[0].plot(induced_noise[:, 0], label="north", color="tab:blue")
+    axs[0].plot(induced_noise[:, 1], label="east", color="tab:orange")
+    axs[0].set_ylabel("Støy posisjon [m]")
+    axs[0].set_title("Indusert måle-støy: posisjon")
+    axs[0].legend()
+    axs[0].grid(True)
+    # Fart
+    axs[1].plot(induced_noise[:, 3], label="speed", color="tab:green")
+    axs[1].set_ylabel("Støy fart [m/s]")
+    axs[1].set_xlabel("Timestep")
+    axs[1].set_title("Indusert måle-støy: fart")
+    axs[1].legend()
+    axs[1].grid(True)
 
 # Show all figures at once after simulation and plotting are fully complete.
 plt.show()

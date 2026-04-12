@@ -2,11 +2,14 @@ from pathlib import Path
 import sys
 import geopandas as gpd
 
+# PATH HELPER (OBLIGATORISK)
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+# IMPORT SIMULATOR-ENVIRONMENTS
 from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
+
 from simulator.ship_in_transit.sub_systems.ship_model import ShipConfiguration, SimulationConfiguration, ShipModel
 from simulator.ship_in_transit.sub_systems.ship_engine import MachinerySystemConfiguration, MachineryMode, MachineryModeParams, MachineryModes, SpecificFuelConsumptionBaudouin6M26Dot3, SpecificFuelConsumptionWartila6L26, RudderConfiguration
 from simulator.ship_in_transit.sub_systems.LOS_guidance import LosParameters
@@ -16,11 +19,14 @@ from simulator.ship_in_transit.sub_systems.wave_model import WaveModelConfigurat
 from simulator.ship_in_transit.sub_systems.current_model import CurrentModelConfiguration
 from simulator.ship_in_transit.sub_systems.wind_model import WindModelConfiguration
 from simulator.ship_in_transit.sub_systems.observers import ShipObserverEKF
+
 from utils.get_path import get_ship_route_path, get_map_path
 from utils.prepare_map import get_gdf_from_gpkg, get_polygon_from_gdf
 from utils.animate import MapAnimator, PolarAnimator, animate_side_by_side
 from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
+
 from stable_baselines3 import SAC
+
 import argparse
 from typing import List
 import numpy as np
@@ -29,7 +35,9 @@ import matplotlib.pyplot as plt
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-parser = argparse.ArgumentParser(description='Ship in Transit Simulation (true signals for colav, RL agent tunes observer)')
+# Argument Parser
+parser = argparse.ArgumentParser(description='Single Ship Observer Tuning Stress Test')
+
 parser.add_argument('--time_step', type=int, default=5)
 parser.add_argument('--engine_step_count', type=int, default=10)
 parser.add_argument('--radius_of_acceptance', type=int, default=300)
@@ -40,19 +48,23 @@ parser.add_argument('--time_since_last_ship_drawing', default=30)
 parser.add_argument('--warm_up_time', type=int, default=2500)
 parser.add_argument('--action_sampling_period', type=int, default=900)
 parser.add_argument('--model_path', type=str, default=None)
+
 args = parser.parse_args()
 
+# Kart og rute
 GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")
 FRAME_LAYER = "frame_3857"
 OCEAN_LAYER = "ocean_3857"
 LAND_LAYER  = "land_3857"
 COAST_LAYER = "coast_3857"
 WATER_LAYER = "water_3857"
+
 frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf = get_gdf_from_gpkg(GPKG_PATH, FRAME_LAYER, OCEAN_LAYER, LAND_LAYER, COAST_LAYER, WATER_LAYER)
 map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
 map_data = get_polygon_from_gdf(land_gdf)
 map = [PolygonObstacle(map_data), frame_gdf]
 
+# Skip og maskinkonfig
 main_engine_capacity = 2160e3
 diesel_gen_capacity = 510e3
 hybrid_shaft_gen_as_generator = 'GEN'
@@ -135,7 +147,9 @@ mec_mode_params = MachineryModeParams(
     name_tag='MEC'
 )
 mec_mode = MachineryMode(params=mec_mode_params)
-mso_modes = MachineryModes([pto_mode, mec_mode, pti_mode])
+mso_modes = MachineryModes([
+    pto_mode, mec_mode, pti_mode
+])
 fuel_spec_me = SpecificFuelConsumptionWartila6L26()
 fuel_spec_dg = SpecificFuelConsumptionBaudouin6M26Dot3()
 machinery_config = MachinerySystemConfiguration(
@@ -159,13 +173,15 @@ machinery_config = MachinerySystemConfiguration(
     specific_fuel_consumption_coefficients_dg=fuel_spec_dg.fuel_consumption_coefficients()
 )
 
-# --- Own ship ---
-own_ship_route_filename = 'Stangvik_AST_reversed.txt'
+# Rute
+own_ship_route_filename = 'Stangvik_AST.txt'
 own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
-start_E, start_N = np.loadtxt(own_ship_route_name)[0]
+mission_traj = np.loadtxt(own_ship_route_name)
+_dummy_start_N, _dummy_start_E = mission_traj[0]
+
 own_ship_config = SimulationConfiguration(
-    initial_north_position_m=start_E,
-    initial_east_position_m=start_N,
+    initial_north_position_m=_dummy_start_N,
+    initial_east_position_m=_dummy_start_E,
     initial_yaw_angle_rad=np.deg2rad(-60.0),
     initial_forward_speed_m_per_s=0.0,
     initial_sideways_speed_m_per_s=0.0,
@@ -173,6 +189,7 @@ own_ship_config = SimulationConfiguration(
     integration_step=args.time_step,
     simulation_time=20000,
 )
+
 own_ship_throttle_controller_gains = ThrottleControllerGains(
    kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001
 )
@@ -187,6 +204,7 @@ own_ship_desired_speed = 4.0
 own_ship_cross_track_error_tolerance = 750
 own_ship_initial_propeller_shaft_speed = 0
 own_ship_initial_propeller_shaft_acceleration = 0
+
 own_ship = ShipModel(
     ship_config=ship_config,
     simulation_config=own_ship_config,
@@ -210,7 +228,7 @@ own_ship = ShipModel(
     print_status=True
 )
 
-# Attach observer to own ship only
+# Observer: initial tuning, will be changed by agent
 own_ship.observer = ShipObserverEKF(
     dt=own_ship.int.dt,
     x0=np.array([
@@ -220,14 +238,11 @@ own_ship.observer = ShipObserverEKF(
         own_ship.forward_speed,
         own_ship.sideways_speed,
         own_ship.yaw_rate
-    ], dtype=float)
-    # Q og R brukes for tuning, ikke for tilfeldig støy
+    ], dtype=float),
+    P0=np.eye(6)*1e-3
 )
+own_ship.observer.measurement_noise_std = np.array([0, 0, 0, 0])
 own_ship.use_observer_for_control = True
-
-# --- Patch: Use true signals for colav (not observer) ---
-# This disables observer-based navigation for COLAV (guidance/control)
-own_ship.use_observer_for_control = False
 
 own_ship_info = AssetInfo(
     current_north       = own_ship.north,
@@ -256,21 +271,24 @@ env = SeaEnvObserverAST(
     include_wind=True,
     include_current=True)
 
+# Last inn agent som tuner observeren
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
-    model_load_path = str(ROOT / "trained_model" / "AST-observer-train-realistic_2026-03-19_14-42-52_04ca" / "model")
+    model_load_path = str(ROOT / "trained_model" / "AST-observer-train_2026-03-18_11-06-13_511b" / "model.zip")
+
 model = SAC.load(model_load_path)
 
+# --- Record observer tuning history ---
 observer_tuning_history = []
 observer_tuning_times = []
-initial_tuning = [1.0, 1.0, 1.0]
-obs, info = env.reset()
 
+obs, info = env.reset()
 step_idx = 0
 while True:
     action, _states = model.predict(obs, deterministic=True)
     obs, reward, terminated, truncated, info = env.step(action)
+    # Logg observer-tuning
     if hasattr(env, 'action_list') and len(env.action_list) > 0:
         tuning = list(env.action_list[-1])
         observer_tuning_history.append(tuning)
@@ -282,17 +300,15 @@ while True:
         print(f"Step {step_idx}: Observer tuning chosen by agent: alpha_r_pos={tuning[0]:.3f}, alpha_r_speed={tuning[1]:.3f}, alpha_q={tuning[2]:.3f} at time {t}")
     else:
         print(f"Step {step_idx}: No observer tuning recorded.")
-    # Debug: print stop info and simulation time
-    print(f"Step {step_idx}: terminated={terminated}, truncated={truncated}, simulation_time={env.assets[0].ship_model.int.time}, stop_info={env.assets[0].ship_model.stop_info}")
     step_idx += 1
     if terminated or truncated:
-        print(f"Simulation stopped at step {step_idx}. Reason: terminated={terminated}, truncated={truncated}")
-        print(f"Final stop_info: {env.assets[0].ship_model.stop_info}")
+        print(f"[DEBUG] Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}")
         break
 
+# --- Plotting (samme som run_single_ship_map_observer) ---
 own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
 result_dfs = [own_ship_results_df]
-repeat=False
+
 map_anim = MapAnimator(
     assets=assets,
     map_gdfs=map_gdfs,
@@ -300,29 +316,27 @@ map_anim = MapAnimator(
     status_asset_index=0
 )
 map_anim.run(fps=120, show=False, repeat=False)
+
 polar_anim = PolarAnimator(focus_asset=assets[0], interval_ms=500)
 polar_anim.run(fps=120, show=False, repeat=False)
+
 animate_side_by_side(map_anim.fig, polar_anim.fig,
                      left_frac=0.68,
                      height_frac=0.92,
                      gap_px=16,
                      show=False)
+
 plot_ship_status(own_ship_asset, own_ship_results_df, plot_env_load=True, show=False)
 plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=False)
-import matplotlib.pyplot as plt
+
+# --- Plot observer tuning over time ---
+plt.figure()
 observer_tuning_history = np.array(observer_tuning_history)
-observer_tuning_times = np.array(observer_tuning_times)
-if observer_tuning_history.shape[0] > 0:
-    plt.figure(figsize=(10, 5))
-    plt.step(observer_tuning_times, observer_tuning_history[:,0], where='post', label='alpha_r_pos')
-    plt.step(observer_tuning_times, observer_tuning_history[:,1], where='post', label='alpha_r_speed')
-    plt.step(observer_tuning_times, observer_tuning_history[:,2], where='post', label='alpha_q')
-    for i, name in enumerate(['alpha_r_pos', 'alpha_r_speed', 'alpha_q']):
-        plt.hlines(initial_tuning[i], observer_tuning_times[0], observer_tuning_times[-1], colors='k', linestyles='dashed', alpha=0.5, label=f'{name} reference' if i==0 else None)
-    plt.xlabel('Simulation time [s]')
-    plt.ylabel('Observer tuning (scaling)')
-    plt.title('Observer tuning over time (RL agent)')
-    plt.ylim(0.4, 2.1)
-    plt.legend()
-    plt.grid(True)
+plt.plot(observer_tuning_times, observer_tuning_history[:,0], label='alpha_r_pos')
+plt.plot(observer_tuning_times, observer_tuning_history[:,1], label='alpha_r_speed')
+plt.plot(observer_tuning_times, observer_tuning_history[:,2], label='alpha_q')
+plt.xlabel('Tid (s)')
+plt.ylabel('Observer-tuning')
+plt.legend()
+plt.title('Observer-tuning valgt av agent')
 plt.show()

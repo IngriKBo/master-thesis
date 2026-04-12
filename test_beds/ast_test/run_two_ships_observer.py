@@ -5,12 +5,14 @@
 
 from pathlib import Path
 import sys
+
 import geopandas as gpd
+import fiona
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
+from env_wrappers.sea_env_ast_v2.observer_two_ships_env import ObserverTwoShipsEnv
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
 from simulator.ship_in_transit.sub_systems.ship_model import ShipConfiguration, SimulationConfiguration, ShipModel
 from simulator.ship_in_transit.sub_systems.ship_engine import MachinerySystemConfiguration, MachineryMode, MachineryModeParams, MachineryModes, SpecificFuelConsumptionBaudouin6M26Dot3, SpecificFuelConsumptionWartila6L26, RudderConfiguration
@@ -39,6 +41,7 @@ parser.add_argument('--time_step', type=int, default=5)
 parser.add_argument('--engine_step_count', type=int, default=10)
 parser.add_argument('--radius_of_acceptance', type=int, default=300)
 parser.add_argument('--lookahead_distance', type=int, default=1000)
+parser.add_argument('--collision_distance', type=float, default=20.0, help='Kollisjonsradius i meter for to skip')
 parser.add_argument('--nav_fail_time', type=int, default=300)
 parser.add_argument('--ship_draw', type=bool, default=True)
 parser.add_argument('--time_since_last_ship_drawing', default=30)
@@ -47,7 +50,14 @@ parser.add_argument('--action_sampling_period', type=int, default=900)
 parser.add_argument('--model_path', type=str, default=None)
 args = parser.parse_args()
 
+
 GPKG_PATH   = get_map_path(ROOT, "basemap.gpkg")
+# Print all available layers in the GPKG for user reference
+print("\n--- Available layers in GPKG ---")
+for layer in fiona.listlayers(GPKG_PATH):
+    print(layer)
+print("--- End of layer list ---\n")
+
 FRAME_LAYER = "frame_3857"
 OCEAN_LAYER = "ocean_3857"
 LAND_LAYER  = "land_3857"
@@ -164,13 +174,30 @@ machinery_config = MachinerySystemConfiguration(
     specific_fuel_consumption_coefficients_dg=fuel_spec_dg.fuel_consumption_coefficients()
 )
 
-# --- Ship 1: RL-agent (original path) ---
 route1_filename = 'own_ship_route.txt'
 route1_path = get_ship_route_path(ROOT, route1_filename)
 start_E1, start_N1 = np.loadtxt(route1_path)[0]
+
+
+## Fjernet bruk av hardkodet rute-fil. Bruk mission trajectory (f.eks. Stangvik_AST_reversed.txt) for begge skip eller som ønsket.
+start_E1, start_N1 = route_points[0]
+start_E2, start_N2 = reversed_points[0]
+
+print(f"Startposisjon skip 1: east={start_E1:.2f}, north={start_N1:.2f}")
+print(f"Startposisjon skip 2: east={start_E2:.2f}, north={start_N2:.2f}")
+
+
+# Sjekk at skipene ikke starter på (nesten) samme posisjon
+start_dist = np.hypot(start_E1 - start_E2, start_N1 - start_N2)
+print(f"Startavstand mellom skipene: {start_dist:.2f} meter (collision_distance={args.collision_distance})")
+if start_dist < 1.0:
+    raise ValueError(f"FEIL: Skipene starter på (nesten) samme posisjon! Avstand={start_dist:.2f} meter. Sjekk rute-filene og startpunktene.")
+elif start_dist < args.collision_distance:
+    raise ValueError(f"Startposisjonene til skipene er for nære! Avstand={start_dist:.2f} < collision_distance={args.collision_distance}. Endre ruter eller startpunkter.")
+
 ship1_config = SimulationConfiguration(
-    initial_north_position_m=start_E1,
-    initial_east_position_m=start_N1,
+    initial_north_position_m=start_N1,  # nord = nord
+    initial_east_position_m=start_E1,   # øst = øst
     initial_yaw_angle_rad=np.deg2rad(-60.0),
     initial_forward_speed_m_per_s=0.0,
     initial_sideways_speed_m_per_s=0.0,
@@ -189,7 +216,7 @@ ship1 = ShipModel(
     heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
     los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
     name_tag='RL Ship',
-    route_name=route1_path,
+    route_name=route_path,
     engine_steps_per_time_step=args.engine_step_count,
     initial_propeller_shaft_speed_rad_per_s=0,
     initial_propeller_shaft_acc_rad_per_sec2=0,
@@ -210,6 +237,7 @@ ship1.observer = ShipObserverEKF(
         ship1.sideways_speed,
         ship1.yaw_rate
     ], dtype=float)
+    # Q og R brukes for tuning, ikke for tilfeldig støy
 )
 ship1.use_observer_for_control = True
 ship1_info = AssetInfo(
@@ -224,15 +252,42 @@ ship1_info = AssetInfo(
 )
 ship1_asset = ShipAsset(ship_model=ship1, info=ship1_info)
 
-# --- Ship 2: Passive, reversed path ---
-route2_filename = 'own_ship_route.txt'
-route2_path = get_ship_route_path(ROOT, route2_filename)
-route2_points = np.loadtxt(route2_path)
-reversed_points = route2_points[::-1]
+# --- Bruk kun hardkodet rute for begge skip ---
+route_filename = 'own_ship_route_hardcoded.txt'
+route_path = os.path.join(ROOT, 'data', 'route', route_filename)
+route_points = np.loadtxt(route_path)
+# Lag reversert rute for skip 2
+reversed_route_path = os.path.join(os.path.dirname(route_path), 'own_ship_route_hardcoded_reversed.txt')
+np.savetxt(reversed_route_path, route_points[::-1], fmt='%.6f')
+reversed_points = route_points[::-1]
+start_E1, start_N1 = route_points[0]
 start_E2, start_N2 = reversed_points[0]
+
+# Print alle rute-punkter for visuell sjekk
+print("\n--- Route points (east, north) ---")
+for idx, (E, N) in enumerate(route_points):
+    print(f"Point {idx}: east={E}, north={N}")
+print("--- End of route points ---\n")
+
+print(f"Startposisjon skip 1: east={start_E1:.2f}, north={start_N1:.2f}")
+print(f"Startposisjon skip 2: east={start_E2:.2f}, north={start_N2:.2f}")
+
+# Sjekk at skipene ikke starter på (nesten) samme posisjon
+start_dist = np.hypot(start_E1 - start_E2, start_N1 - start_N2)
+print(f"Startavstand mellom skipene: {start_dist:.2f} meter (collision_distance={args.collision_distance})")
+if start_dist < 1.0:
+    raise ValueError(f"FEIL: Skipene starter på (nesten) samme posisjon! Avstand={start_dist:.2f} meter. Sjekk rute-filene og startpunktene.")
+elif start_dist < args.collision_distance:
+    raise ValueError(f"Startposisjonene til skipene er for nære! Avstand={start_dist:.2f} < collision_distance={args.collision_distance}. Endre ruter eller startpunkter.")
+
+
+
+
+
+# Use reversed route file for ship 2
 ship2_config = SimulationConfiguration(
-    initial_north_position_m=start_E2,
-    initial_east_position_m=start_N2,
+    initial_north_position_m=start_N2,  # nord = nord
+    initial_east_position_m=start_E2,   # øst = øst
     initial_yaw_angle_rad=np.deg2rad(120.0),  # motsatt retning
     initial_forward_speed_m_per_s=0.0,
     initial_sideways_speed_m_per_s=0.0,
@@ -240,6 +295,7 @@ ship2_config = SimulationConfiguration(
     integration_step=args.time_step,
     simulation_time=20000,
 )
+
 ship2 = ShipModel(
     ship_config=ship_config,
     simulation_config=ship2_config,
@@ -251,7 +307,7 @@ ship2 = ShipModel(
     heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
     los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
     name_tag='Passive Ship',
-    route_name=route2_path,
+    route_name=reversed_route_path,
     engine_steps_per_time_step=args.engine_step_count,
     initial_propeller_shaft_speed_rad_per_s=0,
     initial_propeller_shaft_acc_rad_per_sec2=0,
@@ -262,18 +318,9 @@ ship2 = ShipModel(
     colav_mode='sbmpc',
     print_status=True
 )
-ship2.observer = ShipObserverEKF(
-    dt=ship2.int.dt,
-    x0=np.array([
-        ship2.north,
-        ship2.east,
-        ship2.yaw_angle,
-        ship2.forward_speed,
-        ship2.sideways_speed,
-        ship2.yaw_rate
-    ], dtype=float)
-)
-ship2.use_observer_for_control = True
+
+
+# Ikke observer på skip 2
 ship2_info = AssetInfo(
     current_north=ship2.north,
     current_east=ship2.east,
@@ -288,35 +335,39 @@ ship2_asset = ShipAsset(ship_model=ship2, info=ship2_info)
 
 assets: List[ShipAsset] = [ship1_asset, ship2_asset]
 
-env = SeaEnvObserverAST(
+env = ObserverTwoShipsEnv(
     assets=assets,
     map=map,
     wave_model_config=wave_model_config,
     current_model_config=current_model_config,
     wind_model_config=wind_model_config,
-    args=args,
-    include_wave=True,
-    include_wind=True,
-    include_current=True)
+    args=args
+)
 
 # Last inn RL-modell
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
-    model_load_path = str(ROOT / "trained_model" / "AST-observer-train-realistic_2026-03-19_14-42-52_04ca" / "model")
+    model_load_path = str(ROOT / "trained_model" / "AST-observer-train-realistic_2026-04-09_15-51-05_3d8f" / "model")
 model = SAC.load(model_load_path)
 
 obs, info = env.reset()
 while True:
     # RL-agent styrer kun skip 1, skip 2 får ingen RL-action (f.eks. null-action eller fast policy)
     action, _states = model.predict(obs, deterministic=True)
-    # Sett action for skip 2 til null eller fast verdi
-    if isinstance(action, np.ndarray) and action.shape[0] == 1:
-        action = np.concatenate([action, np.zeros_like(action)])
-    elif isinstance(action, np.ndarray) and action.shape[0] == 2:
-        pass  # allerede to actions
+    # Sørg for at action alltid har riktig lengde for miljøet (minst 3 elementer)
+    expected_action_dim = 3  # Oppdater hvis miljøet krever flere
+    try:
+        expected_action_dim = env.action_space.shape[0]
+    except Exception:
+        pass
+    action_out = np.zeros(expected_action_dim)
+    if isinstance(action, (list, tuple, np.ndarray)):
+        action = np.array(action).flatten()
+        action_out[:min(len(action), expected_action_dim)] = action[:min(len(action), expected_action_dim)]
     else:
-        action = np.array([action, 0])
+        action_out[0] = float(action)
+    action = action_out
     obs, reward, terminated, truncated, info = env.step(action)
     if terminated or truncated:
         break

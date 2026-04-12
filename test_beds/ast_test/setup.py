@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 ### IMPORT SIMULATOR ENVIRONMENTS
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
 from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
+from env_wrappers.sea_env_ast_v2.observer_two_ships_env import ObserverTwoShipsEnv
 from env_wrappers.sea_env_ast_v1.env import SeaEnvAST
 
 from simulator.ship_in_transit.sub_systems.ship_model import  ShipConfiguration, SimulationConfiguration, ShipModel
@@ -37,6 +38,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 # ============================================
 ENVIRONMENT_SCENARIOS = {
     'observer': SeaEnvObserverAST,
+    'observer_two_ships': ObserverTwoShipsEnv,
     'wave': SeaEnvAST,
     # Add more scenarios here: 'scenario_name': EnvironmentClass
 }
@@ -244,8 +246,9 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
         print_status=print_ship_status
     )
 
+
     # Attach EKF observer when training/evaluating observer scenario
-    if scenario == 'observer':
+    if scenario in ['observer', 'observer_two_ships']:
         own_ship.observer = ShipObserverEKF(
             dt=own_ship.int.dt,
             x0=np.array([
@@ -279,21 +282,76 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
     )
 
     # Package the assets for reinforcement learning agent
-    assets: List[ShipAsset] = [own_ship_asset]
 
-    ################################### ENV SPACE ###################################
-
-    # Initiate Multi-Ship Reinforcement Learning Environment Class Wrapper
-    # Use the selected scenario environment
-    env = env_class(
-        assets=assets,
-        map=map,
-        wave_model_config=wave_model_config,
-        current_model_config=current_model_config,
-        wind_model_config=wind_model_config,
-        args=args,
-        include_wave=True,
-        include_wind=True,
-        include_current=True)
-    
+    if scenario == 'observer_two_ships':
+        # --- Ship 2: Motsatt path av skip 1 ---
+        route2_filename = 'Stangvik_AST.txt'  # motsatt rute av own_ship
+        route2_path = get_ship_route_path(ROOT, route2_filename)
+        start_E2, start_N2 = np.loadtxt(route2_path)[0]
+        ship2_config = SimulationConfiguration(
+            initial_north_position_m=start_E2,
+            initial_east_position_m=start_N2,
+            initial_yaw_angle_rad=np.deg2rad(120.0),  # motsatt retning
+            initial_forward_speed_m_per_s=0.0,
+            initial_sideways_speed_m_per_s=0.0,
+            initial_yaw_rate_rad_per_s=0.0,
+            integration_step=args.time_step,
+            simulation_time=20000,
+        )
+        ship2 = ShipModel(
+            ship_config=ship_config,
+            simulation_config=ship2_config,
+            wave_model_config=wave_model_config,
+            current_model_config=current_model_config,
+            wind_model_config=wind_model_config,
+            machinery_config=machinery_config,
+            throttle_controller_gain=ThrottleControllerGains(kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001),
+            heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
+            los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
+            name_tag='Passive Ship',
+            route_name=route2_path,
+            engine_steps_per_time_step=args.engine_step_count,
+            initial_propeller_shaft_speed_rad_per_s=0,
+            initial_propeller_shaft_acc_rad_per_sec2=0,
+            desired_speed=4.0,
+            cross_track_error_tolerance=750,
+            nav_fail_time=args.nav_fail_time,
+            map_obj=map[0],
+            colav_mode='sbmpc',
+            print_status=print_ship_status
+        )
+        ship2_info = AssetInfo(
+            current_north=ship2.north,
+            current_east=ship2.east,
+            current_yaw_angle=ship2.yaw_angle,
+            forward_speed=ship2.forward_speed,
+            sideways_speed=ship2.sideways_speed,
+            name_tag=ship2.name_tag,
+            ship_length=ship2.l_ship,
+            ship_width=ship2.w_ship
+        )
+        ship2_asset = ShipAsset(ship_model=ship2, info=ship2_info)
+        assets: List[ShipAsset] = [own_ship_asset, ship2_asset]
+        env = env_class(
+            assets=assets,
+            map=map,
+            wave_model_config=wave_model_config,
+            current_model_config=current_model_config,
+            wind_model_config=wind_model_config,
+            args=args,
+            include_wave=True,
+            include_wind=True,
+            include_current=True)
+    else:
+        assets: List[ShipAsset] = [own_ship_asset]
+        env = env_class(
+            assets=assets,
+            map=map,
+            wave_model_config=wave_model_config,
+            current_model_config=current_model_config,
+            wind_model_config=wind_model_config,
+            args=args,
+            include_wave=True,
+            include_wind=True,
+            include_current=True)
     return env, assets, map_gdfs

@@ -16,7 +16,7 @@ from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
 ## IMPORT AST RELATED TOOLS
 from stable_baselines3 import SAC
 from stable_baselines3.sac import MlpPolicy, MultiInputPolicy
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from gymnasium.wrappers import FlattenObservation, RescaleAction
 from gymnasium.utils.env_checker import check_env
 
@@ -88,14 +88,17 @@ def parse_cli_args():
     parser.add_argument('--model_name', type=str, default='AST-observer-train-realistic', metavar='MODEL_NAME',
                         help='AST: base name for this training run folder under trained_model (default: AST-observer-train-realistic)')
 
+    # Add argument for scenario
+    parser.add_argument('--scenario', type=str, default='observer', metavar='SCENARIO',
+                        help='Scenario to train on: observer or observer_two_ships (default: observer)')
+
     # Parse args
     args = parser.parse_args()
-    
     return args
 
 if __name__ == "__main__":
 
-###################################### TRAIN THE MODEL #####################################
+    ###################################### TRAIN THE MODEL #####################################
 
     # Get the args
     args = parse_cli_args()
@@ -103,13 +106,13 @@ if __name__ == "__main__":
     # Create unique output paths under trained_model/
     model_name = args.model_name
     model_path, log_path, tb_path = get_trained_model_and_log_path(root=ROOT, model_name=model_name)
-    
-    # Get the assets and AST Environment Wrapper
-    env, assets, map_gdfs = get_env_assets(args=args, scenario='observer')
 
-    # Hard safety check so we never train wrong scenario by accident
-    if type(env).__name__ != "SeaEnvObserverAST":
-        raise RuntimeError(f"Wrong environment selected: {type(env).__name__}. Expected SeaEnvObserverAST.")
+    # Get the assets and AST Environment Wrapper, scenario from args
+    env, assets, map_gdfs = get_env_assets(args=args, scenario=args.scenario)
+
+    # Hard safety check så vi aldri trener feil scenario ved et uhell
+    if type(env).__name__ not in ["SeaEnvObserverAST", "ObserverTwoShipsEnv"]:
+        raise RuntimeError(f"Wrong environment selected: {type(env).__name__}. Expected SeaEnvObserverAST or ObserverTwoShipsEnv.")
     if env.assets[0].ship_model.observer is None:
         raise RuntimeError("Observer is not attached to ship model. Aborting observer-scenario training.")
 
@@ -117,25 +120,22 @@ if __name__ == "__main__":
     print(f"Model save path    : {model_path}.zip")
     print(f"Run log path       : {log_path}.txt")
     print(f"TensorBoard path   : {tb_path}")
-    
-    # Check env sanity. This simulator is stochastic, so deterministic-check may fail.
+
+    # Check env sanity. Denne simulatoren er stokastisk, så deterministisk-sjekk kan feile.
     try:
         check_env(env)
-        print("Environment passes all chekcs!")
+        print("Environment passes all checks!")
     except Exception as e:
         print(f"Environment has issues: {e}")
         if args.strict_env_check:
             print("ABORT TRAINING (strict env check enabled)")
-            sys.exit(1)  # non-zero exit code stops the script
+            sys.exit(1)  # non-zero exit code stopper scriptet
         print("Continuing training (strict env check disabled).")
 
-    # Log config + actual env class to file
+    # Logg config + faktisk env-klasse til fil
     log_ast_training_config(args=args, txt_path=log_path, env=env, also_print=True)
-    
-    # Set the Policy
-    # Later
-    
-    # Set RL model
+
+    # Sett RL-modell
     ast_model = SAC("MultiInputPolicy",
                     env=env,
                     learning_rate=3e-4,
@@ -163,17 +163,23 @@ if __name__ == "__main__":
                     verbose=1,
                     seed=None,
                     device='cuda')
-    
-    # Train the RL model. Record the time
+
+    # Tren RL-modellen. Ta tiden
     start_time = time.time()
     progress_cb = PercentProgressCallback(total_timesteps=args.total_steps, print_every_pct=1)
-    ast_model.learn(total_timesteps=args.total_steps, callback=progress_cb)
+    # Legg til checkpoint callback for jevnlig lagring
+    checkpoint_callback = CheckpointCallback(
+        save_freq=1000,  # lagre hver 1000. steg
+        save_path=str(Path(model_path).parent),
+        name_prefix=model_name + "_checkpoint"
+    )
+    ast_model.learn(total_timesteps=args.total_steps, callback=[progress_cb, checkpoint_callback])
     elapsed_time = time.time() - start_time
     minutes, seconds = divmod(elapsed_time, 60)
     hours, _         = divmod(minutes, 60)
     train_time = (hours, minutes, seconds)
-    
-    # Save the trained model
+
+    # Lagre den trente modellen
     ast_model.save(model_path)
 
 ################################## LOAD THE TRAINED MODEL ##################################

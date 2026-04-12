@@ -202,8 +202,8 @@ own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
 start_E, start_N = np.loadtxt(own_ship_route_name)[0]  # expecting two columns: east, north
 
 own_ship_config = SimulationConfiguration(
-    initial_north_position_m=start_E,
-    initial_east_position_m=start_N,
+    initial_north_position_m=start_N,
+    initial_east_position_m=start_E,
     initial_yaw_angle_rad=np.deg2rad(-60.0),
     initial_forward_speed_m_per_s=0.0,
     initial_sideways_speed_m_per_s=0.0,

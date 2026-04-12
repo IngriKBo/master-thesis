@@ -217,11 +217,22 @@ own_ship = ShipModel(
 #  SKRU OBSERVER AV/PÅ HER:
 # =====================
 USE_OBSERVER = True  
-# Tuning: Stol maksimalt på målingene, minimalt på modell
-Q_obs = np.diag([1e-10, 1e-10, 1e-10, 0.01, 0.01, 0.01])
-# R_obs must match [north, east, yaw, speed]
-R_obs = np.diag([1e-12, 1e-12, 1e-12, 1e-12])
 
+# === Observer tuning scaling parameters ===
+Q_SCALE = 500.0  # Set to 1.0 for original, 100.0 for 100x, etc.
+R_SCALE = 500.0
+
+# Measurement noise standard deviation for observer (set to None or np.zeros(4) for no noise)
+MEAS_NOISE_STD = np.zeros(4)  # [north, east, yaw, speed] (set to zero for debugging)
+
+# === Observer tuning scaling parameters ===
+Q_SCALE = 500.0  # Set to 100.0 for 100x increased process noise
+R_SCALE = 500.0  # Set to 100.0 for 100x increased measurement noise
+
+# Tuning: Stol maksimalt på målingene, minimalt på modell
+Q_obs = None  # Bruk default eller tuningverdier
+# R_obs må matche [north, east, yaw, speed]
+R_obs = None
 
 # Bestem observerens tidssteg
 observer_dt = args.observer_time_step if args.observer_time_step is not None else own_ship.int.dt
@@ -234,9 +245,8 @@ own_ship.observer = ShipObserverEKF(
         own_ship.forward_speed,
         own_ship.sideways_speed,
         own_ship.yaw_rate
-    ], dtype=float),
-    Q=Q_obs,
-    R=R_obs
+    ], dtype=float)
+    # Q og R brukes for tuning, ikke for tilfeldig støy
 )
 own_ship.use_observer_for_control = USE_OBSERVER
 own_ship_info = AssetInfo(
