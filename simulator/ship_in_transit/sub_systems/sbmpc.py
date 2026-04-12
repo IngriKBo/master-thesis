@@ -10,7 +10,7 @@ class SBMPCParams:
     Q_: float = 4.0  # exponent to satisfy colregs rule 16
     D_INIT_: float = 2000.0  # should be >= D_CLOSE   # distance to an obstacle to activate sbmpc [m]
     D_CLOSE_: float = 2000.0  # distance for an nearby obstacle [m]
-    D_SAFE_: float = 1000.0  # distance of safety zone [m]
+    D_SAFE_: float = 500.0  # distance of safety zone [m] (ENDRET fra 1000)
     K_COLL_: float = 1e-6  # Weight for cost of collision --> C_i^k = K_COLL * |v_os - v_i^k|^2
     PHI_AH_: float = np.deg2rad(68.5)  # colregs angle - ahead [deg]
     PHI_OT_: float = np.deg2rad(68.5)  # colregs angle - overtaken [deg]
@@ -177,9 +177,14 @@ class SBMPC:
                     u_os_best = self._params.P_ca_[j]
                     chi_os_best = self._params.Chi_ca_[i]
         
+        # Fallback hvis ingen styring ble funnet
+        try:
+            u_os_best
+        except NameError:
+            u_os_best = 1
+            chi_os_best = 0
         self._params.P_ca_last_ = u_os_best
         self._params.Chi_ca_last_ = chi_os_best
-
         return u_os_best, chi_os_best
     
     def is_stephen_useful(self) -> bool:
@@ -249,7 +254,9 @@ class SBMPC:
                     d_safe_i = d_safe + os_l / 2 + obs_l / 2 # --> Increases safety distance
 
                 if dist < d_safe_i:
-                    R = (1 / (abs(t - t0) ** self._params.P_)) * (d_safe / dist) ** self._params.Q_
+                    # Beskytt mot deling på null eller ekstremt små tall
+                    safe_dist = max(dist, 1e-3)
+                    R = (1 / (abs(t - t0) ** self._params.P_)) * (d_safe / safe_dist) ** self._params.Q_
                     k_coll = self._params.K_COLL_ * os_l * obs_l
                     C = k_coll * np.linalg.norm(v_s - v_o) ** 2
 

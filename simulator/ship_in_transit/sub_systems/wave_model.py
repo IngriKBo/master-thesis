@@ -97,32 +97,36 @@ class JONSWAPWaveModel:
         wave frequencies using a JONSWAP formula in Faltinsen (1993).
         
         '''
+        # Robusthetssjekker for inputverdier
+        Hs = max(Hs, 0.1)
+        Tp = max(Tp, 0.1)
+        omega_vec = np.clip(omega_vec, 0.1, None)
+
         # Peak frequency
         wp = 2.0 * np.pi / Tp
-        
         # Clip the wp based on Hs to keep within the validity area of the spectrum
         wp = np.clip(wp, 1.25/np.sqrt(Hs), 1.75/np.sqrt(Hs))
-        
+
         # Alpha
         alpha = 0.2 * Hs**2 * wp**4 / self.g**2
-        
+
         # Sigma (check across all frequency, then assign the sigma to each frequency)
         sigma = np.where(omega_vec <= wp, 0.07, 0.09)
-        
+
         # Getting the gamma based on DNV GL [Sørensen (2018)]
         k = (2 * np.pi) / (wp * np.sqrt(Hs))
-        
+
         if k <= 3.6:
             gamma = 5
         elif k <= 5.0:
             gamma = np.exp(5.75 - 1.15 * k)
         elif k > 5.0:
             gamma = 1
-            
+
         # JONSWAP core
         gamma_exp = np.exp(- (omega_vec - wp)**2 / (2 * sigma**2 * wp**2))
         Sj = alpha * self.g**2 / omega_vec**5 * np.exp(-1.25*(wp/omega_vec)**4) * gamma**gamma_exp
-        
+
         # Ensure non negative (negative energy density has no meaning at all)
         return np.maximum(Sj, 0.0)
     

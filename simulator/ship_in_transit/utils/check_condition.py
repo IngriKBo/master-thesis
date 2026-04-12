@@ -1,4 +1,3 @@
-
 import numpy as np
 from simulator.ship_in_transit.sub_systems.obstacle import PolygonObstacle
 
@@ -24,7 +23,7 @@ def is_pos_outside_horizon(map_obj:PolygonObstacle,
         Only works with start to end route points method (Two initial points).
     '''
     # Unpack ship position
-    n_pos, e_pos = pos
+    e_pos, n_pos = pos   # byttet
         
     # Get the map boundaries
     min_north = map_obj.min_north
@@ -45,6 +44,11 @@ def is_pos_outside_horizon(map_obj:PolygonObstacle,
         
     is_outside = outside_n or outside_e
         
+    # Debug print for horizon check
+    print(f"[DEBUG][is_pos_outside_horizon] pos: north={n_pos}, east={e_pos}, margin={margin}")
+    print(f"[DEBUG][is_pos_outside_horizon] n_route_bound: {n_route_bound}, e_route_bound: {e_route_bound}")
+    print(f"[DEBUG][is_pos_outside_horizon] outside_n: {outside_n}, outside_e: {outside_e}, is_outside: {is_outside}")
+    
     return is_outside
     
 def is_grounding(map_obj:PolygonObstacle,

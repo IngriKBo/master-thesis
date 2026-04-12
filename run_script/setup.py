@@ -25,6 +25,7 @@ from utils.prepare_map import get_gdf_from_gpkg, get_polygon_from_gdf
 ### IMPORT TOOLS
 from typing import List
 import numpy as np
+import math
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
@@ -165,7 +166,7 @@ def get_env_assets(args, print_ship_status=False):
 
     N_0, E_0 = np.loadtxt(own_ship_route_name)[0]  # expecting two columns: east, north
     N_1, E_1 = np.loadtxt(own_ship_route_name)[1]  # expecting two columns: east, north
-    psi_0    = np.atan2((E_1 - E_0), (N_1 - N_0))
+    psi_0    = math.atan2((E_1 - E_0), (N_1 - N_0))
 
     own_ship_config = SimulationConfiguration(
         initial_north_position_m=N_0,
@@ -216,6 +217,8 @@ def get_env_assets(args, print_ship_status=False):
         colav_mode='sbmpc',
         print_status=print_ship_status
     )
+    # Disable observer-based control
+    own_ship.use_observer_for_control = False
     own_ship_info = AssetInfo(
         # dynamic state (mutable)
         current_north       = own_ship.north,
@@ -235,22 +238,62 @@ def get_env_assets(args, print_ship_status=False):
         info=own_ship_info
     )
 
-    # Package the assets for reinforcement learning agent
-    assets: List[ShipAsset] = [own_ship_asset]
+    # --- Legg til passivt skip for to-skips-miljø ---
+    passive_ship_config = SimulationConfiguration(
+        initial_north_position_m=own_ship.north + 200,  # Plasser passivt skip et stykke unna
+        initial_east_position_m=own_ship.east + 200,
+        initial_yaw_angle_rad=own_ship.yaw_angle + np.pi,  # motsatt retning
+        initial_forward_speed_m_per_s=0.0,
+        initial_sideways_speed_m_per_s=0.0,
+        initial_yaw_rate_rad_per_s=0.0,
+        integration_step=args.time_step,
+        simulation_time=20000,
+    )
+    passive_ship = ShipModel(
+        ship_config=ship_config,
+        simulation_config=passive_ship_config,
+        wave_model_config=wave_model_config,
+        current_model_config=current_model_config,
+        wind_model_config=wind_model_config,
+        machinery_config=machinery_config,
+        throttle_controller_gain=ThrottleControllerGains(kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001),
+        heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
+        los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
+        name_tag='Passive Ship',
+        route_name=own_ship.route_name,
+        engine_steps_per_time_step=args.engine_step_count,
+        initial_propeller_shaft_speed_rad_per_s=0,
+        initial_propeller_shaft_acc_rad_per_sec2=0,
+        desired_speed=4.0,
+        cross_track_error_tolerance=750,
+        nav_fail_time=args.nav_fail_time,
+        traj_threshold_coeff=args.traj_threshold_coeff,
+        map_obj=map[0],
+        colav_mode='sbmpc',
+        print_status=False
+    )
+    passive_ship_info = AssetInfo(
+        current_north=passive_ship.north,
+        current_east=passive_ship.east,
+        current_yaw_angle=passive_ship.yaw_angle,
+        forward_speed=passive_ship.forward_speed,
+        sideways_speed=passive_ship.sideways_speed,
+        name_tag=passive_ship.name_tag,
+        ship_length=passive_ship.l_ship,
+        ship_width=passive_ship.w_ship
+    )
+    passive_ship_asset = ShipAsset(ship_model=passive_ship, info=passive_ship_info)
 
-    ################################### ENV SPACE ###################################
+    assets: List[ShipAsset] = [own_ship_asset, passive_ship_asset]
 
-    # Initiate Multi-Ship Reinforcement Learning Environment Class Wrapper
-    env = SeaEnvASTv2(
+    # --- Bruk ObserverTwoShipsEnv ---
+    from env_wrappers.sea_env_ast_v2.observer_two_ships_env import ObserverTwoShipsEnv
+    env = ObserverTwoShipsEnv(
         assets=assets,
         map=map,
         wave_model_config=wave_model_config,
         current_model_config=current_model_config,
         wind_model_config=wind_model_config,
-        args=args,
-        max_state_name=args.max_sea_state,
-        include_wave=True,
-        include_wind=True,
-        include_current=True)
-    
+        args=args
+    )
     return env, assets, map_gdfs

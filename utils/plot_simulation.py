@@ -113,11 +113,26 @@ def plot_ship_status(asset, result_df, plot_env_load=True, show=False):
     axes[4].plot(t, result_df['propeller shaft speed [rpm]'])
     axes[4].set_title(f'{nm} Propeller Shaft Speed')
     _ax_style(axes[4], xlabel=True, ylabel='Shaft speed (rpm)')
-    
+
     # 6. Thrust Force
     axes[5].plot(t, result_df['thrust force [kN]'])
     axes[5].set_title(f'{nm} Thrust force')
     _ax_style(axes[5], xlabel=True, ylabel='Thrust force (kN)')
+
+
+    # 8. Ship trajectory (east as x, north as y) -- always last subplot
+    if 'east position [m]' in result_df.columns and 'north position [m]' in result_df.columns:
+        axes[7].plot(
+            result_df['east position [m]'],
+            result_df['north position [m]'],
+            color='#0c3c78', lw=1.3, label='Ship trajectory')
+        axes[7].set_title(f'{nm} Ship Trajectory')
+        axes[7].set_xlabel('East position (m)')
+        axes[7].set_ylabel('North position (m)')
+        axes[7].legend(loc='upper right', frameon=False)
+        axes[7].grid(True, linestyle='--', alpha=0.7)
+    else:
+        axes[7].set_visible(False)
 
     # 7. Power vs available power (mode-dependent)
     ax6 = axes[6]
@@ -202,6 +217,44 @@ def plot_ship_status(asset, result_df, plot_env_load=True, show=False):
         ac[1].set_ylim(-180, 180)
 
         fig_c.suptitle(f'Current field on {nm}', y=1.02)
+
+    # ADDED/CHANGED: Observer estimate vs actual (if available)
+    est_cols = ['estimated north [m]', 'estimated east [m]', 'estimated speed [m/s]']
+    if all(col in result_df.columns for col in est_cols):
+        est_n = result_df['estimated north [m]']
+        est_e = result_df['estimated east [m]']
+        est_s = result_df['estimated speed [m/s]']
+        if not (np.isnan(est_n.to_numpy()).all() and np.isnan(est_e.to_numpy()).all() and np.isnan(est_s.to_numpy()).all()):
+            fig_obs, axo = plt.subplots(2, 2, figsize=(12, 8), constrained_layout=True)
+            axo = axo.flatten()
+
+            # Estimation errors (estimated - actual)
+            err_n = est_n - result_df['north position [m]']
+            err_e = est_e - result_df['east position [m]']
+            err_s = est_s - speed
+            err_pos = np.hypot(err_n, err_e)
+
+            axo[0].plot(t, err_n, label='North error')
+            axo[0].axhline(y=0.0, color='red', linestyle='--', linewidth=1.2)
+            axo[0].set_title(f'{nm} North Error (Estimated - Actual)')
+            _ax_style(axo[0], xlabel=True, ylabel='Error (m)')
+            axo[0].legend(frameon=False)
+            axo[1].plot(t, err_e, label='East error')
+            axo[1].axhline(y=0.0, color='red', linestyle='--', linewidth=1.2)
+            axo[1].set_title(f'{nm} East Error (Estimated - Actual)')
+            _ax_style(axo[1], xlabel=True, ylabel='Error (m)')
+            axo[1].legend(frameon=False)
+
+            axo[2].plot(t, err_s, label='Speed error')
+            axo[2].axhline(y=0.0, color='red', linestyle='--', linewidth=1.2)
+            axo[2].set_title(f'{nm} Speed Error (Estimated - Actual)')
+            _ax_style(axo[2], xlabel=True, ylabel='Error (m/s)')
+            axo[2].legend(frameon=False)
+
+            axo[3].plot(t, err_pos, label='Position error norm')
+            axo[3].set_title(f'{nm} Position Error Norm')
+            _ax_style(axo[3], xlabel=True, ylabel='||pos error|| (m)')
+            axo[3].legend(frameon=False)
 
     if show:
         plt.show()
@@ -338,52 +391,63 @@ def plot_ship_and_real_map(
     own_handle = None
     route_handle = None
 
+
+
     for i, asset in enumerate(assets):
         # actual sailed track
+        east_vals = result_dfs[i]["east position [m]"].to_numpy()
+        north_vals = result_dfs[i]["north position [m]"].to_numpy()
+        print(f"[PLOT DEBUG] east_vals (min, max): {east_vals.min()}, {east_vals.max()}")
+        print(f"[PLOT DEBUG] north_vals (min, max): {north_vals.min()}, {north_vals.max()}")
+        print(f"[PLOT DEBUG] east_vals (first 5): {east_vals[:5]}")
+        print(f"[PLOT DEBUG] north_vals (first 5): {north_vals[:5]}")
+        # Plot as line (swap to east=x, north=y)
         line, = ax.plot(
-            result_dfs[i]["east position [m]"].to_numpy(),
-            result_dfs[i]["north position [m]"].to_numpy(),
+            north_vals,  # x-axis: north
+            east_vals,   # y-axis: east
             color=own_color,
-            lw=2.4,
-            alpha=0.98,
-            zorder=5,
+            lw=1.6,  # thinner line
+            alpha=1.0,
+            zorder=10,
             label="Own ship" if own_handle is None else "_nolegend_",
         )
         if own_handle is None:
             own_handle = line
 
-        # planned/mission trajectory from autopilot
-        if asset.ship_model.auto_pilot is not None:
-            route_line, = ax.plot(
-                asset.ship_model.auto_pilot.navigate.east,
-                asset.ship_model.auto_pilot.navigate.north,
-                linestyle="--",
-                lw=1.8,
-                alpha=0.95,
-                color=route_color,
-                zorder=5,
-                label="Mission trajectory" if route_handle is None else "_nolegend_",
-            )
-            ax.scatter(
-                asset.ship_model.auto_pilot.navigate.east,
-                asset.ship_model.auto_pilot.navigate.north,
-                marker="x",
-                s=30,
-                linewidths=1.6,
-                color=route_color,
-                zorder=6,
-            )
-            if route_handle is None:
-                route_handle = route_line
+    # Print axis limits after plotting
+    print(f"[PLOT DEBUG] ax.get_xlim(): {ax.get_xlim()}")
+    print(f"[PLOT DEBUG] ax.get_ylim(): {ax.get_ylim()}")
+
+    # planned/mission trajectory from autopilot
+    if asset.ship_model.auto_pilot is not None:
+        route_line, = ax.plot(
+            asset.ship_model.auto_pilot.navigate.north,  # x-axis: north
+            asset.ship_model.auto_pilot.navigate.east,   # y-axis: east
+            linestyle="--",
+            lw=1.8,
+            alpha=0.95,
+            color=route_color,
+            zorder=5,
+            label="Mission trajectory" if route_handle is None else "_nolegend_",
+        )
+        ax.scatter(
+            asset.ship_model.auto_pilot.navigate.north,
+            asset.ship_model.auto_pilot.navigate.east,
+            marker="x",
+            s=30,
+            linewidths=1.6,
+            color=route_color,
+            zorder=6,
+        )
+        if route_handle is None:
+            route_handle = route_line
 
         # ship outlines along the path
-        for x, y in zip(asset.ship_model.ship_drawings[1],
-                        asset.ship_model.ship_drawings[0]):
+        for x, y in zip(asset.ship_model.ship_drawings[1], asset.ship_model.ship_drawings[0]):
             ax.plot(x, y, color=own_color, lw=1.0, zorder=7)
 
     # --- axes, labels, legend -----------------------------------------------
     ax.set_axis_on()
-    # fig.subplots_adjust(left=0.075, right=0.45, top=0.45, bottom=0.075)
     fig.subplots_adjust(left=0.08, right=0.98, top=0.96, bottom=0.12)
 
     title_fs = 12
@@ -403,7 +467,6 @@ def plot_ship_and_real_map(
 
     ax.tick_params(axis="both", which="major", labelsize=tick_fs, length=3)
 
-
     # legend (only if we have handles)
     handles = [h for h in (own_handle, route_handle) if h is not None]
     labels = [h.get_label() for h in handles]
@@ -416,7 +479,7 @@ def plot_ship_and_real_map(
 
     if show:
         plt.show()
-        
+
     # === resize figure for paper ===
     target_width = 5.0  # inches, change as you like (e.g. 2.5, 3.5, ...)
     # preserve the current data aspect ratio

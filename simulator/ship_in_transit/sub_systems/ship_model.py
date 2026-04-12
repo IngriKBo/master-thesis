@@ -5,6 +5,7 @@ It requires the construction of the ship machinery system to construct the ship 
 
 
 import numpy as np
+import math
 import copy
 from collections import defaultdict
 from typing import NamedTuple, List
@@ -486,7 +487,8 @@ class ShipModel(BaseShipModel):
                  traj_threshold_coeff=2.0,
                  map_obj=None,
                  colav_mode=None,
-                 print_status=True):
+                 print_status=True,
+                 observer=None):
         super().__init__(ship_config, simulation_config, wave_model_config, current_model_config, wind_model_config)
         
         self.map_obj = map_obj
@@ -553,6 +555,17 @@ class ShipModel(BaseShipModel):
         
         # Print status flag
         self.print_status = print_status
+
+        # ADDED/CHANGED: Optional observer (EKF) for state estimation
+        self.observer = observer
+        self.estimated_north = float(self.north)
+        self.estimated_east = float(self.east)
+        self.estimated_speed = float(self.speed)
+        self.estimated_heading = float(self.yaw_angle)
+        # If True, controllers/ColAV use observer estimates instead of true state
+        self.use_observer_for_control = False
+        # ADDED/CHANGED: observer measurement noise standard deviations [north, east, speed]
+        self.observer_noise_std = np.zeros(3, dtype=float)
         
         # Ship statuses time series
         self.colav_active_array     = []
@@ -989,11 +1002,20 @@ class ShipModel(BaseShipModel):
             
         '''          
         # Measure ship position and speed
-        north_position = self.north
-        east_position = self.east
-        heading = self.yaw_angle
+        # If enabled, feed observer estimates into guidance/control (observer-based navigation)
+        if self.observer is not None and self.use_observer_for_control:
+            north_position = float(self.estimated_north)
+            east_position = float(self.estimated_east)
+            heading = float(self.estimated_heading)
+        else:
+            north_position = self.north
+            east_position = self.east
+            heading = self.yaw_angle
         measured_shaft_speed = self.ship_machinery_model.omega
-        measured_speed = np.sqrt(self.forward_speed**2 + self.sideways_speed**2)
+        if self.observer is not None and self.use_observer_for_control:
+            measured_speed = float(self.estimated_speed)
+        else:
+            measured_speed = np.sqrt(self.forward_speed**2 + self.sideways_speed**2)
         self.speed = measured_speed
         
         # Keep it, even when sbmpc is disabled
@@ -1083,6 +1105,30 @@ class ShipModel(BaseShipModel):
                                   rudder_angle=rudder_angle, 
                                   env_loads=env_loads)
         self.integrate_differentials()
+
+        # ADDED/CHANGED: Update observer estimate at time t + dt
+        if self.observer is not None:
+            measured_speed = np.hypot(self.forward_speed, self.sideways_speed)
+            measurement = np.array([
+                self.north,
+                self.east,
+                self.yaw_angle,
+                max(0.0, measured_speed)
+            ], dtype=float)
+            self.observer.predict()
+            self.observer.update(measurement)
+            self.estimated_north = float(self.observer.x[0])
+            self.estimated_east = float(self.observer.x[1])
+            self.estimated_heading = float(self.observer.x[2])
+            self.estimated_speed = float(np.hypot(self.observer.x[3], self.observer.x[4]))
+            self.simulation_results['estimated north [m]'].append(self.estimated_north)
+            self.simulation_results['estimated east [m]'].append(self.estimated_east)
+            self.simulation_results['estimated speed [m/s]'].append(self.estimated_speed)
+        else:
+            # ADDED/CHANGED: keep arrays aligned when no observer
+            self.simulation_results['estimated north [m]'].append(np.nan)
+            self.simulation_results['estimated east [m]'].append(np.nan)
+            self.simulation_results['estimated speed [m/s]'].append(np.nan)
         
         # Track the travel distance between route points
         self.track_travel_distance()
@@ -1110,13 +1156,28 @@ class ShipModel(BaseShipModel):
             
         # Initialize states based on auto pilot route
         if route is not None:
-            N_0, E_0 = np.loadtxt(route)[0]  # expecting two columns: east, north
-            N_1, E_1 = np.loadtxt(route)[1]  # expecting two columns: east, north
-            psi_0    = np.atan2((E_1 - E_0), (N_1 - N_0))
-            
+            # Route files are always east, north
+            E_0, N_0 = np.loadtxt(route)[0]  # east, north
+            E_1, N_1 = np.loadtxt(route)[1]
+            psi_0    = math.atan2((E_1 - E_0), (N_1 - N_0))
             self.north      = N_0
             self.east       = E_0
             self.yaw_angle  = psi_0
+
+        # ADDED/CHANGED: Reset observer state to match the ship state
+        if self.observer is not None:
+            x0 = np.array([
+                self.north,
+                self.east,
+                self.yaw_angle,
+                self.forward_speed,
+                self.sideways_speed,
+                self.yaw_rate
+            ], dtype=float)
+            self.observer.reset(x0=x0)
+            self.estimated_north = float(self.north)
+            self.estimated_east = float(self.east)
+            self.estimated_speed = float(np.hypot(self.forward_speed, self.sideways_speed))
         
         # Reset the navigational failure parameter
         self.init_navigational_failure_param()

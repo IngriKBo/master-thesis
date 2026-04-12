@@ -1,0 +1,19 @@
+#============================================ AST TRAINING CONFIG ===========================================#
+timestamp                     : 2026-04-08T12:46:25
+action_sampling_period        : 900
+engine_step_count             : 10
+lookahead_distance            : 1000
+map_gpkg_filename             : Stangvik.gpkg
+model_name                    : AST-observer-two-ships-train
+n_episodes                    : 1
+nav_fail_time                 : 300
+radius_of_acceptance          : 300
+scenario                      : observer_two_ships
+ship_draw                     : True
+strict_env_check              : False
+time_since_last_ship_drawing  : 30
+time_step                     : 5
+total_steps                   : 25000
+warm_up_time                  : 2500
+#----------------------------------- Used AST Environment Wrapper -------------------------------------#
+env id/name                   : ObserverTwoShipsEnv

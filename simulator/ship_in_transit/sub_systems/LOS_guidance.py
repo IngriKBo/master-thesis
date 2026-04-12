@@ -76,11 +76,11 @@ class NavigationSystem:
         else:
             self.data = route  # Assume it's already an array
         
-        self.north = []
         self.east = []
+        self.north = []
         for i in range(0, (int(np.size(self.data) / 2))):
-            self.north.append(self.data[i][0])
-            self.east.append(self.data[i][1])
+            self.east.append(self.data[i][0])
+            self.north.append(self.data[i][1])
 
     def next_wpt(self, k, N, E):
         ''' Returns the index of the next and current waypoint. The method, if

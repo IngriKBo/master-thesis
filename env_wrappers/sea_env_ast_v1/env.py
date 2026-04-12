@@ -242,8 +242,14 @@ class SeaEnvAST(gym.Env):
         Automatically normalized the observation.
         """   
         # Get raw values
-        position                = np.array([self.assets[0].ship_model.north, self.assets[0].ship_model.east, self.assets[0].ship_model.yaw_angle], dtype=np.float32)
-        speed                   = np.array([self.assets[0].ship_model.speed], dtype=np.float32)
+        # ADDED/CHANGED: use observer estimates for own-ship if available
+        ship = self.assets[0].ship_model
+        if ship.observer is not None:
+            position = np.array([ship.estimated_north, ship.estimated_east, ship.yaw_angle], dtype=np.float32)
+            speed = np.array([ship.estimated_speed], dtype=np.float32)
+        else:
+            position = np.array([ship.north, ship.east, ship.yaw_angle], dtype=np.float32)
+            speed = np.array([ship.speed], dtype=np.float32)
         cross_track_error       = np.array([self.assets[0].ship_model.auto_pilot.navigate.e_ct], dtype=np.float32)
         wind                    = np.array([self.assets[0].ship_model.simulation_results['wind speed [m/s]'][-1], 
                                             self.assets[0].ship_model.simulation_results['wind dir [deg]'][-1]], dtype=np.float32)
