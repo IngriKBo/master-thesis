@@ -1,3 +1,5 @@
+
+import numpy as np
 from pathlib import Path
 import sys
 
@@ -98,10 +100,13 @@ def parse_cli_args():
 
 if __name__ == "__main__":
 
+
     ###################################### TRAIN THE MODEL #####################################
+
 
     # Get the args
     args = parse_cli_args()
+
 
     # Create unique output paths under trained_model/
     model_name = args.model_name
@@ -109,6 +114,11 @@ if __name__ == "__main__":
 
     # Get the assets and AST Environment Wrapper, scenario from args
     env, assets, map_gdfs = get_env_assets(args=args, scenario=args.scenario)
+
+    # Set observer measurement noise for RL training (same as simulation)
+    # Values: [north, east, yaw, speed] (see run_single_ship_map_observer.py)
+    observer = assets[0].ship_model.observer
+    observer.measurement_noise_std = np.array([2.0, 2.0, 0.017, 0.1])
 
     # Hard safety check så vi aldri trener feil scenario ved et uhell
     if type(env).__name__ not in ["SeaEnvObserverAST", "ObserverTwoShipsEnv"]:
