@@ -290,7 +290,7 @@ own_ship.observer = ShipObserverEKF(
 #   - Posisjon: 1–5 meter (f.eks. GPS typisk 2–3 m std)
 #   - Yaw: 0.01–0.05 rad (0.5–3 grader)
 #   - Fart: 0.05–0.2 m/s (Doppler logg, GPS)
-own_ship.observer.measurement_noise_std = np.array([0, 0, 0, 0])  # Juster etter behov
+own_ship.observer.measurement_noise_std = np.array([10.0, 10.0, 0.1, 0.6])  # Realistisk støy: [north, east, yaw, speed]
 own_ship.use_observer_for_control = True  # Nå bruker ColAV observerens (støyete) signaler
 
 own_ship_info = AssetInfo(
@@ -330,17 +330,6 @@ env = SeaEnvObserverAST(
     include_wind=True,
     include_current=True)
 
-# --- DEBUG: Print map boundaries and initial position ---
-poly_map = map[0]
-print("[DEBUG] Map boundaries:")
-print(f"  min_north: {poly_map.min_north}")
-print(f"  max_north: {poly_map.max_north}")
-print(f"  min_east:  {poly_map.min_east}")
-print(f"  max_east:  {poly_map.max_east}")
-init_ship = own_ship
-print("[DEBUG] Initial ship position:")
-print(f"  north: {init_ship.north}")
-print(f"  east:  {init_ship.east}")
 
 # Posisjon er riktig her
 
@@ -411,28 +400,10 @@ animate_side_by_side(map_anim.fig, polar_anim.fig,
 
 # Plot 1: Trajectory + observer plots
 
-# --- DEBUG: Print east/north values before plotting ---
-print("[DEBUG] First 5 east positions:", own_ship_results_df["east position [m]"].head().to_list())
-print("[DEBUG] First 5 north positions:", own_ship_results_df["north position [m]"].head().to_list())
-print("[DEBUG] Last 5 east positions:", own_ship_results_df["east position [m]"].tail().to_list())
-print("[DEBUG] Last 5 north positions:", own_ship_results_df["north position [m]"].tail().to_list())
-if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
-    print("[DEBUG] Waypoints (east):", getattr(own_ship.auto_pilot.navigate, 'east', []))
-    print("[DEBUG] Waypoints (north):", getattr(own_ship.auto_pilot.navigate, 'north', []))
+
 
 plot_ship_status(own_ship_asset, own_ship_results_df, plot_env_load=True, show=False)
 
-# Plot 2: Status plot
-
-# --- DEBUG: Print values to be plotted for ship trajectory ---
-east_vals = own_ship_results_df["east position [m]"].to_numpy()
-north_vals = own_ship_results_df["north position [m]"].to_numpy()
-print("[DEBUG] Trajectory east (min, max):", np.min(east_vals), np.max(east_vals))
-print("[DEBUG] Trajectory north (min, max):", np.min(north_vals), np.max(north_vals))
-print("[DEBUG] Trajectory east (first 5):", east_vals[:5])
-print("[DEBUG] Trajectory north (first 5):", north_vals[:5])
-print("[DEBUG] Trajectory east (last 5):", east_vals[-5:])
-print("[DEBUG] Trajectory north (last 5):", north_vals[-5:])
 
 plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=False)
 
