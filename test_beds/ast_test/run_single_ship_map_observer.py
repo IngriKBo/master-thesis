@@ -290,7 +290,7 @@ own_ship.observer = ShipObserverEKF(
 #   - Posisjon: 1–5 meter (f.eks. GPS typisk 2–3 m std)
 #   - Yaw: 0.01–0.05 rad (0.5–3 grader)
 #   - Fart: 0.05–0.2 m/s (Doppler logg, GPS)
-own_ship.observer.measurement_noise_std = np.array([10.0, 10.0, 0.1, 0.6])  # Realistisk støy: [north, east, yaw, speed]
+own_ship.observer.measurement_noise_std = np.array([2.0, 2.0, 0.017, 0.1])  # MELDES AT DETTE ER REALISTISK STØY FOR GPS + IMU, IKKE TILFELDIG STØY FOR TUNING. JUSTER VED BEHOV.
 own_ship.use_observer_for_control = True  # Nå bruker ColAV observerens (støyete) signaler
 
 own_ship_info = AssetInfo(
@@ -337,7 +337,7 @@ env = SeaEnvObserverAST(
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
-    model_load_path = str(ROOT / "trained_model" / "AST-observer-train_2026-03-18_11-06-13_511b" / "model.zip")
+    model_load_path = str(ROOT / "trained_model" / "AST-observer-train-realistic_2026-04-13_01-44-44_d35c" / "model.zip")
 
 model = SAC.load(model_load_path)
 
@@ -437,18 +437,18 @@ observer = env.assets[0].ship_model.observer
 if hasattr(observer, 'induced_noise_log') and len(observer.induced_noise_log) > 0:
     induced_noise = np.array(observer.induced_noise_log)
     fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    # Posisjon
+    # Position
     axs[0].plot(induced_noise[:, 0], label="north", color="tab:blue")
     axs[0].plot(induced_noise[:, 1], label="east", color="tab:orange")
-    axs[0].set_ylabel("Støy posisjon [m]")
-    axs[0].set_title("Indusert måle-støy: posisjon")
+    axs[0].set_ylabel("Measurement noise position [m]")
+    axs[0].set_title("Induced measurement noise: position")
     axs[0].legend()
     axs[0].grid(True)
-    # Fart
+    # Speed
     axs[1].plot(induced_noise[:, 3], label="speed", color="tab:green")
-    axs[1].set_ylabel("Støy fart [m/s]")
+    axs[1].set_ylabel("Measurement noise speed [m/s]")
     axs[1].set_xlabel("Timestep")
-    axs[1].set_title("Indusert måle-støy: fart")
+    axs[1].set_title("Induced measurement noise: speed")
     axs[1].legend()
     axs[1].grid(True)
 

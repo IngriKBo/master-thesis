@@ -1,19 +1,16 @@
-# run_two_ships_observer.py
-# Basert på run_single_ship_map_observer.py, men med to skip:
-# - Skip 1: RL-agent (som i original)
-# - Skip 2: Motsatt path, ikke styrt av RL-agent
-
 from pathlib import Path
 import sys
-
 import geopandas as gpd
-import fiona
 
+## PATH HELPER (OBLIGATORY)
+# project root = two levels up from this file
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from env_wrappers.sea_env_ast_v2.observer_two_ships_env import ObserverTwoShipsEnv
+### IMPORT SIMULATOR ENVIRONMENTS
+from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
+
 from simulator.ship_in_transit.sub_systems.ship_model import ShipConfiguration, SimulationConfiguration, ShipModel
 from simulator.ship_in_transit.sub_systems.ship_engine import MachinerySystemConfiguration, MachineryMode, MachineryModeParams, MachineryModes, SpecificFuelConsumptionBaudouin6M26Dot3, SpecificFuelConsumptionWartila6L26, RudderConfiguration
 from simulator.ship_in_transit.sub_systems.LOS_guidance import LosParameters
@@ -23,11 +20,18 @@ from simulator.ship_in_transit.sub_systems.wave_model import WaveModelConfigurat
 from simulator.ship_in_transit.sub_systems.current_model import CurrentModelConfiguration
 from simulator.ship_in_transit.sub_systems.wind_model import WindModelConfiguration
 from simulator.ship_in_transit.sub_systems.observers import ShipObserverEKF
+
+## IMPORT FUNCTIONS
 from utils.get_path import get_ship_route_path, get_map_path
 from utils.prepare_map import get_gdf_from_gpkg, get_polygon_from_gdf
 from utils.animate import MapAnimator, PolarAnimator, animate_side_by_side
 from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
+
+## RL
+
 from stable_baselines3 import SAC
+
+### IMPORT TOOLS
 import argparse
 from typing import List
 import numpy as np
@@ -36,44 +40,63 @@ import matplotlib.pyplot as plt
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-parser = argparse.ArgumentParser(description='Ship in Transit Simulation (two ships, one RL, one passive)')
-parser.add_argument('--time_step', type=int, default=5)
-parser.add_argument('--engine_step_count', type=int, default=10)
-parser.add_argument('--radius_of_acceptance', type=int, default=300)
-parser.add_argument('--lookahead_distance', type=int, default=1000)
-parser.add_argument('--collision_distance', type=float, default=20.0, help='Kollisjonsradius i meter for to skip')
-parser.add_argument('--nav_fail_time', type=int, default=300)
-parser.add_argument('--ship_draw', type=bool, default=True)
-parser.add_argument('--time_since_last_ship_drawing', default=30)
-parser.add_argument('--warm_up_time', type=int, default=2500)
-parser.add_argument('--action_sampling_period', type=int, default=900)
-parser.add_argument('--model_path', type=str, default=None)
+
+###############################################################################
+
+# Argument Parser
+parser = argparse.ArgumentParser(description='Ship in Transit Simulation (trained agent)')
+
+## Add arguments for environments
+parser.add_argument('--time_step', type=int, default=5, metavar='TIMESTEP',
+                    help='ENV: time step size in second for ship transit simulator (default: 5)')
+parser.add_argument('--engine_step_count', type=int, default=10, metavar='ENGINE_STEP_COUNT',
+                    help='ENV: engine integration step count in between simulation timestep (default: 10)')
+parser.add_argument('--radius_of_acceptance', type=int, default=300, metavar='ROA',
+                    help='ENV: radius of acceptance in meter for LOS algorithm (default: 300)')
+parser.add_argument('--lookahead_distance', type=int, default=1000, metavar='LD',
+                    help='ENV: lookahead distance in meter for LOS algorithm (default: 1000)')
+parser.add_argument('--nav_fail_time', type=int, default=300, metavar='NAV_FAIL_TIME',
+                    help='ENV: Allowed recovery time in second from navigational failure warning condition (default: 300)')
+parser.add_argument('--ship_draw', type=bool, default=True, metavar='SHIP_DRAW',
+                    help='ENV: record ship drawing for plotting and animation (default: True)')
+parser.add_argument('--time_since_last_ship_drawing', default=30, metavar='SHIP_DRAW_TIME',
+                    help='ENV: time delay in second between ship drawing record (default: 30)')
+
+# Add arguments for AST-core
+parser.add_argument('--warm_up_time', type=int, default=2500, metavar='WARM_UP_TIME',
+                    help='AST: time needed in second before policy - action sampling takes place (default: 1500)')
+parser.add_argument('--action_sampling_period', type=int, default=900, metavar='ACT_SAMPLING_PERIOD',
+                    help='AST: time period in second between policy - action sampling (default: 900, matches training)')
+parser.add_argument('--model_path', type=str, default=None, metavar='MODEL_PATH',
+                    help='AST: path to model zip (or path without .zip). If omitted, uses a fixed trained_model run path')
+
 args = parser.parse_args()
 
-
-GPKG_PATH   = get_map_path(ROOT, "basemap.gpkg")
-# Print all available layers in the GPKG for user reference
-print("\n--- Available layers in GPKG ---")
-for layer in fiona.listlayers(GPKG_PATH):
-    print(layer)
-print("--- End of layer list ---\n")
-
+# -----------------------
+# GPKG settings (edit if your layer names differ)
+# -----------------------
+GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")       # <-- put your file here (or absolute path)
 FRAME_LAYER = "frame_3857"
 OCEAN_LAYER = "ocean_3857"
 LAND_LAYER  = "land_3857"
-COAST_LAYER = "coast_3857"
-WATER_LAYER = "water_3857"
+COAST_LAYER = "coast_3857"               # optional
+WATER_LAYER = "water_3857"               # optional
+
 frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf = get_gdf_from_gpkg(GPKG_PATH, FRAME_LAYER, OCEAN_LAYER, LAND_LAYER, COAST_LAYER, WATER_LAYER)
 map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
-map_data = get_polygon_from_gdf(land_gdf)
-map = [PolygonObstacle(map_data), frame_gdf]
 
-main_engine_capacity = 2160e3
-diesel_gen_capacity = 510e3
+# --- Kartdata: bruk (east, north) direkte til PolygonObstacle ---
+map_data = get_polygon_from_gdf(land_gdf)   # list of exterior rings (E,N)
+map = [PolygonObstacle(map_data), frame_gdf]              # <-- reuse your existing simulator map type
+
+# Engine configuration
+main_engine_capacity = 2160e3 #4160e3
+diesel_gen_capacity = 510e3 #610e3
 hybrid_shaft_gen_as_generator = 'GEN'
 hybrid_shaft_gen_as_motor = 'MOTOR'
 hybrid_shaft_gen_as_offline = 'OFF'
 
+# Configure the simulation
 ship_config = ShipConfiguration(
     coefficient_of_deadweight_to_displacement=0.7,
     bunkers=200000,
@@ -112,7 +135,7 @@ current_model_config = CurrentModelConfiguration(
     timestep_size=args.time_step
 )
 wind_model_config = WindModelConfiguration(
-    initial_mean_wind_velocity=None,
+    initial_mean_wind_velocity=None,                    # Set to None to use a mean wind component
     mean_wind_velocity_decay_rate=0.025,
     mean_wind_velocity_standard_deviation=0.005,
     initial_wind_direction=np.deg2rad(0.0),
@@ -136,6 +159,7 @@ pto_mode_params = MachineryModeParams(
     name_tag='PTO'
 )
 pto_mode = MachineryMode(params=pto_mode_params)
+
 pti_mode_params = MachineryModeParams(
     main_engine_capacity=0,
     electrical_capacity=2*diesel_gen_capacity,
@@ -143,6 +167,7 @@ pti_mode_params = MachineryModeParams(
     name_tag='PTI'
 )
 pti_mode = MachineryMode(params=pti_mode_params)
+
 mec_mode_params = MachineryModeParams(
     main_engine_capacity=main_engine_capacity,
     electrical_capacity=diesel_gen_capacity,
@@ -150,7 +175,9 @@ mec_mode_params = MachineryModeParams(
     name_tag='MEC'
 )
 mec_mode = MachineryMode(params=mec_mode_params)
-mso_modes = MachineryModes([pto_mode, mec_mode, pti_mode])
+mso_modes = MachineryModes(
+    [pto_mode, mec_mode, pti_mode]
+)
 fuel_spec_me = SpecificFuelConsumptionWartila6L26()
 fuel_spec_dg = SpecificFuelConsumptionBaudouin6M26Dot3()
 machinery_config = MachinerySystemConfiguration(
@@ -174,223 +201,244 @@ machinery_config = MachinerySystemConfiguration(
     specific_fuel_consumption_coefficients_dg=fuel_spec_dg.fuel_consumption_coefficients()
 )
 
-route1_filename = 'own_ship_route.txt'
-route1_path = get_ship_route_path(ROOT, route1_filename)
-start_E1, start_N1 = np.loadtxt(route1_path)[0]
-
-
-## Fjernet bruk av hardkodet rute-fil. Bruk mission trajectory (f.eks. Stangvik_AST_reversed.txt) for begge skip eller som ønsket.
-start_E1, start_N1 = route_points[0]
-start_E2, start_N2 = reversed_points[0]
-
-print(f"Startposisjon skip 1: east={start_E1:.2f}, north={start_N1:.2f}")
-print(f"Startposisjon skip 2: east={start_E2:.2f}, north={start_N2:.2f}")
-
-
-# Sjekk at skipene ikke starter på (nesten) samme posisjon
-start_dist = np.hypot(start_E1 - start_E2, start_N1 - start_N2)
-print(f"Startavstand mellom skipene: {start_dist:.2f} meter (collision_distance={args.collision_distance})")
-if start_dist < 1.0:
-    raise ValueError(f"FEIL: Skipene starter på (nesten) samme posisjon! Avstand={start_dist:.2f} meter. Sjekk rute-filene og startpunktene.")
-elif start_dist < args.collision_distance:
-    raise ValueError(f"Startposisjonene til skipene er for nære! Avstand={start_dist:.2f} < collision_distance={args.collision_distance}. Endre ruter eller startpunkter.")
-
-ship1_config = SimulationConfiguration(
-    initial_north_position_m=start_N1,  # nord = nord
-    initial_east_position_m=start_E1,   # øst = øst
-    initial_yaw_angle_rad=np.deg2rad(-60.0),
-    initial_forward_speed_m_per_s=0.0,
-    initial_sideways_speed_m_per_s=0.0,
-    initial_yaw_rate_rad_per_s=0.0,
-    integration_step=args.time_step,
-    simulation_time=20000,
+### CONFIGURE THE SHIP SIMULATION MODELS
+## Own ship
+# --- Set up route and controllers ---
+own_ship_throttle_controller_gains = ThrottleControllerGains(
+   kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001
 )
-ship1 = ShipModel(
+own_ship_heading_controller_gains = HeadingControllerGains(kp=1.5, kd=75, ki=0.005)
+own_ship_los_guidance_parameters = LosParameters(
+    radius_of_acceptance=args.radius_of_acceptance,
+    lookahead_distance=args.lookahead_distance,
+    integral_gain=0.002,
+    integrator_windup_limit=4000
+)
+own_ship_desired_speed = 4.0
+own_ship_cross_track_error_tolerance = 750
+own_ship_initial_propeller_shaft_speed = 0
+own_ship_initial_propeller_shaft_acceleration = 0
+
+
+
+# --- Load route and assign east/north correctly ---
+own_ship_route_filename = 'Stangvik_AST_reversed.txt'
+own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
+route_data = np.loadtxt(own_ship_route_name)  # expecting two columns: east, north
+# route_data[:,0] = east, route_data[:,1] = north
+start_E = route_data[0, 0]
+start_N = route_data[0, 1]
+own_ship_config = SimulationConfiguration(
+        initial_north_position_m=start_N,  # north from route file
+        initial_east_position_m=start_E,   # east from route file
+        initial_yaw_angle_rad=np.deg2rad(-60.0),
+        initial_forward_speed_m_per_s=0.0,
+        initial_sideways_speed_m_per_s=0.0,
+        initial_yaw_rate_rad_per_s=0.0,
+        integration_step=args.time_step,
+        simulation_time=20000,
+)
+
+# --- Instantiate ShipModel (auto_pilot will process the route) ---
+
+# --- Instantiate ShipModel (auto_pilot will process the route) ---
+own_ship = ShipModel(
     ship_config=ship_config,
-    simulation_config=ship1_config,
+    simulation_config=own_ship_config,
     wave_model_config=wave_model_config,
     current_model_config=current_model_config,
     wind_model_config=wind_model_config,
     machinery_config=machinery_config,
-    throttle_controller_gain=ThrottleControllerGains(kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001),
-    heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
-    los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
-    name_tag='RL Ship',
-    route_name=route_path,
+    throttle_controller_gain=own_ship_throttle_controller_gains,
+    heading_controller_gain=own_ship_heading_controller_gains,
+    los_parameters=own_ship_los_guidance_parameters,
+    name_tag='Own ship',
+    route_name=own_ship_route_name,
     engine_steps_per_time_step=args.engine_step_count,
-    initial_propeller_shaft_speed_rad_per_s=0,
-    initial_propeller_shaft_acc_rad_per_sec2=0,
-    desired_speed=4.0,
-    cross_track_error_tolerance=750,
+    initial_propeller_shaft_speed_rad_per_s=own_ship_initial_propeller_shaft_speed * np.pi /30,
+    initial_propeller_shaft_acc_rad_per_sec2=own_ship_initial_propeller_shaft_acceleration * np.pi / 30,
+    desired_speed=own_ship_desired_speed,
+    cross_track_error_tolerance=own_ship_cross_track_error_tolerance,
     nav_fail_time=args.nav_fail_time,
     map_obj=map[0],
     colav_mode='sbmpc',
     print_status=True
 )
-ship1.observer = ShipObserverEKF(
-    dt=ship1.int.dt,
+
+# --- Ensure autopilot waypoints are set as east/north ---
+if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
+    own_ship.auto_pilot.navigate.east = route_data[:, 0].tolist()
+    own_ship.auto_pilot.navigate.north = route_data[:, 1].tolist()
+
+
+# Attach observer to own ship only
+# Q og R brukes for tuning, ikke for tilfeldig støy
+own_ship.observer = ShipObserverEKF(
+    dt=own_ship.int.dt,
     x0=np.array([
-        ship1.north,
-        ship1.east,
-        ship1.yaw_angle,
-        ship1.forward_speed,
-        ship1.sideways_speed,
-        ship1.yaw_rate
-    ], dtype=float)
-    # Q og R brukes for tuning, ikke for tilfeldig støy
+        own_ship.north,
+        own_ship.east,
+        own_ship.yaw_angle,
+        own_ship.forward_speed,
+        own_ship.sideways_speed,
+        own_ship.yaw_rate
+    ], dtype=float),
+    P0=np.eye(6)*1e-3
 )
-ship1.use_observer_for_control = True
-ship1_info = AssetInfo(
-    current_north=ship1.north,
-    current_east=ship1.east,
-    current_yaw_angle=ship1.yaw_angle,
-    forward_speed=ship1.forward_speed,
-    sideways_speed=ship1.sideways_speed,
-    name_tag=ship1.name_tag,
-    ship_length=ship1.l_ship,
-    ship_width=ship1.w_ship
+# Sett eksplisitt måle-støy (std) på observeren: [north, east, yaw, speed]
+# Realistisk støy (std):
+#   - Posisjon: 1–5 meter (f.eks. GPS typisk 2–3 m std)
+#   - Yaw: 0.01–0.05 rad (0.5–3 grader)
+#   - Fart: 0.05–0.2 m/s (Doppler logg, GPS)
+own_ship.observer.measurement_noise_std = np.array([10.0, 10.0, 0.1, 0.6])  # Realistisk støy: [north, east, yaw, speed]
+own_ship.use_observer_for_control = True  # Nå bruker ColAV observerens (støyete) signaler
+
+own_ship_info = AssetInfo(
+    # dynamic state (mutable)
+    current_north       = own_ship.north,
+    current_east        = own_ship.east,
+    current_yaw_angle   = own_ship.yaw_angle,
+    forward_speed       = own_ship.forward_speed,
+    sideways_speed      = own_ship.sideways_speed,
+
+    # static properties (constants)
+    name_tag            = own_ship.name_tag,
+    ship_length         = own_ship.l_ship,
+    ship_width          = own_ship.w_ship
 )
-ship1_asset = ShipAsset(ship_model=ship1, info=ship1_info)
-
-# --- Bruk kun hardkodet rute for begge skip ---
-route_filename = 'own_ship_route_hardcoded.txt'
-route_path = os.path.join(ROOT, 'data', 'route', route_filename)
-route_points = np.loadtxt(route_path)
-# Lag reversert rute for skip 2
-reversed_route_path = os.path.join(os.path.dirname(route_path), 'own_ship_route_hardcoded_reversed.txt')
-np.savetxt(reversed_route_path, route_points[::-1], fmt='%.6f')
-reversed_points = route_points[::-1]
-start_E1, start_N1 = route_points[0]
-start_E2, start_N2 = reversed_points[0]
-
-# Print alle rute-punkter for visuell sjekk
-print("\n--- Route points (east, north) ---")
-for idx, (E, N) in enumerate(route_points):
-    print(f"Point {idx}: east={E}, north={N}")
-print("--- End of route points ---\n")
-
-print(f"Startposisjon skip 1: east={start_E1:.2f}, north={start_N1:.2f}")
-print(f"Startposisjon skip 2: east={start_E2:.2f}, north={start_N2:.2f}")
-
-# Sjekk at skipene ikke starter på (nesten) samme posisjon
-start_dist = np.hypot(start_E1 - start_E2, start_N1 - start_N2)
-print(f"Startavstand mellom skipene: {start_dist:.2f} meter (collision_distance={args.collision_distance})")
-if start_dist < 1.0:
-    raise ValueError(f"FEIL: Skipene starter på (nesten) samme posisjon! Avstand={start_dist:.2f} meter. Sjekk rute-filene og startpunktene.")
-elif start_dist < args.collision_distance:
-    raise ValueError(f"Startposisjonene til skipene er for nære! Avstand={start_dist:.2f} < collision_distance={args.collision_distance}. Endre ruter eller startpunkter.")
-
-
-
-
-
-# Use reversed route file for ship 2
-ship2_config = SimulationConfiguration(
-    initial_north_position_m=start_N2,  # nord = nord
-    initial_east_position_m=start_E2,   # øst = øst
-    initial_yaw_angle_rad=np.deg2rad(120.0),  # motsatt retning
-    initial_forward_speed_m_per_s=0.0,
-    initial_sideways_speed_m_per_s=0.0,
-    initial_yaw_rate_rad_per_s=0.0,
-    integration_step=args.time_step,
-    simulation_time=20000,
+# Wraps simulation objects based on the ship type using a dictionary
+own_ship_asset = ShipAsset(
+    ship_model=own_ship,
+    info=own_ship_info
 )
 
-ship2 = ShipModel(
-    ship_config=ship_config,
-    simulation_config=ship2_config,
-    wave_model_config=wave_model_config,
-    current_model_config=current_model_config,
-    wind_model_config=wind_model_config,
-    machinery_config=machinery_config,
-    throttle_controller_gain=ThrottleControllerGains(kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001),
-    heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
-    los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
-    name_tag='Passive Ship',
-    route_name=reversed_route_path,
-    engine_steps_per_time_step=args.engine_step_count,
-    initial_propeller_shaft_speed_rad_per_s=0,
-    initial_propeller_shaft_acc_rad_per_sec2=0,
-    desired_speed=4.0,
-    cross_track_error_tolerance=750,
-    nav_fail_time=args.nav_fail_time,
-    map_obj=map[0],
-    colav_mode='sbmpc',
-    print_status=True
-)
+# Package the assets for reinforcement learning agent
+assets: List[ShipAsset] = [own_ship_asset]
 
+################################### ENV SPACE ###################################
 
-# Ikke observer på skip 2
-ship2_info = AssetInfo(
-    current_north=ship2.north,
-    current_east=ship2.east,
-    current_yaw_angle=ship2.yaw_angle,
-    forward_speed=ship2.forward_speed,
-    sideways_speed=ship2.sideways_speed,
-    name_tag=ship2.name_tag,
-    ship_length=ship2.l_ship,
-    ship_width=ship2.w_ship
-)
-ship2_asset = ShipAsset(ship_model=ship2, info=ship2_info)
+# Initiate Multi-Ship Reinforcement Learning Environment Class Wrapper
 
-assets: List[ShipAsset] = [ship1_asset, ship2_asset]
-
-env = ObserverTwoShipsEnv(
+env = SeaEnvObserverAST(
     assets=assets,
     map=map,
     wave_model_config=wave_model_config,
     current_model_config=current_model_config,
     wind_model_config=wind_model_config,
-    args=args
-)
+    args=args,
+    include_wave=True,
+    include_wind=True,
+    include_current=True)
 
-# Last inn RL-modell
+
+# Posisjon er riktig her
+
+# Load trained model
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
-    model_load_path = str(ROOT / "trained_model" / "AST-observer-train-realistic_2026-04-09_15-51-05_3d8f" / "model")
+    model_load_path = str(ROOT / "trained_model" / "AST-observer-train_2026-03-18_11-06-13_511b" / "model.zip")
+
 model = SAC.load(model_load_path)
 
+# Run trained model
+
+# --- Record observer tuning history ---
+observer_tuning_history = []
+observer_tuning_times = []
+initial_tuning = [1.0, 1.0, 1.0]  # Reference (nominal) tuning
+
 obs, info = env.reset()
+step_idx = 0
 while True:
-    # RL-agent styrer kun skip 1, skip 2 får ingen RL-action (f.eks. null-action eller fast policy)
     action, _states = model.predict(obs, deterministic=True)
-    # Sørg for at action alltid har riktig lengde for miljøet (minst 3 elementer)
-    expected_action_dim = 3  # Oppdater hvis miljøet krever flere
-    try:
-        expected_action_dim = env.action_space.shape[0]
-    except Exception:
-        pass
-    action_out = np.zeros(expected_action_dim)
-    if isinstance(action, (list, tuple, np.ndarray)):
-        action = np.array(action).flatten()
-        action_out[:min(len(action), expected_action_dim)] = action[:min(len(action), expected_action_dim)]
-    else:
-        action_out[0] = float(action)
-    action = action_out
+    print(f"Step {step_idx}: Agent action (normalized): {action}")
     obs, reward, terminated, truncated, info = env.step(action)
+    # Print the denormalized observer tuning chosen by the agent for this action
+    if hasattr(env, 'action_list') and len(env.action_list) > 0:
+        tuning = list(env.action_list[-1])
+        observer_tuning_history.append(tuning)
+        # Use the time at which the action was sampled
+        if hasattr(env, 'action_time_list') and len(env.action_time_list) > 0:
+            t = env.action_time_list[-1]
+        else:
+            t = len(observer_tuning_history)
+        observer_tuning_times.append(t)
+        print(f"Step {step_idx}: Observer tuning chosen by agent: alpha_r_pos={tuning[0]:.3f}, alpha_r_speed={tuning[1]:.3f}, alpha_q={tuning[2]:.3f} at time {t}")
+    else:
+        print(f"Step {step_idx}: No observer tuning recorded.")
+    step_idx += 1
     if terminated or truncated:
+        print(f"[DEBUG] Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}")
         break
 
-# Resultater og plotting
-ship1_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
-ship2_results_df = pd.DataFrame().from_dict(env.assets[1].ship_model.simulation_results)
-result_dfs = [ship1_results_df, ship2_results_df]
+################################## GET RESULTS ##################################
 
+## Get the simulation results for all assets, and plot the asset simulation results
+own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
+result_dfs = [own_ship_results_df]
+
+# Build both animations (don’t show yet)
+repeat=False
 map_anim = MapAnimator(
     assets=assets,
     map_gdfs=map_gdfs,
     interval_ms=500,
-    status_asset_index=0
+    status_asset_index=0  # flags for own ship
 )
 map_anim.run(fps=120, show=False, repeat=False)
 
 polar_anim = PolarAnimator(focus_asset=assets[0], interval_ms=500)
 polar_anim.run(fps=120, show=False, repeat=False)
 
-animate_side_by_side(map_anim.fig, polar_anim.fig, left_frac=0.68, height_frac=0.92, gap_px=16, show=False)
+# Place windows next to each other, same height, centered
+animate_side_by_side(map_anim.fig, polar_anim.fig,
+                     left_frac=0.68,  # how wide the map window is
+                     height_frac=0.92,
+                     gap_px=16,
+                     show=False)
 
-plot_ship_status(ship1_asset, ship1_results_df, plot_env_load=True, show=False)
-plot_ship_status(ship2_asset, ship2_results_df, plot_env_load=True, show=False)
+# Plot 1: Trajectory + observer plots
+
+
+
+plot_ship_status(own_ship_asset, own_ship_results_df, plot_env_load=True, show=False)
+
+
 plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=False)
+
+
+# --- Plot observer tuning over time ---
+
+import matplotlib.pyplot as plt
+# Use full observer tuning history if available (logs every sim timestep)
+if hasattr(env, 'observer_tuning_full_history') and len(env.observer_tuning_full_history) > 0:
+    observer_tuning_history = np.array(env.observer_tuning_full_history)
+    observer_tuning_times = np.array(env.observer_tuning_full_times)
+else:
+    observer_tuning_history = np.array(observer_tuning_history)
+    observer_tuning_times = np.array(observer_tuning_times)
+
+if observer_tuning_history.shape[0] > 0:
+    plt.figure(figsize=(10, 5))
+    plt.step(observer_tuning_times, observer_tuning_history[:,0], where='post', label='alpha_r_pos')
+    plt.step(observer_tuning_times, observer_tuning_history[:,1], where='post', label='alpha_r_speed')
+    plt.step(observer_tuning_times, observer_tuning_history[:,2], where='post', label='alpha_q')
+    for i, name in enumerate(['alpha_r_pos', 'alpha_r_speed', 'alpha_q']):
+        plt.hlines(initial_tuning[i], observer_tuning_times[0], observer_tuning_times[-1], colors='k', linestyles='dashed', alpha=0.5, label=f'{name} reference' if i==0 else None)
+    plt.xlabel('Simulation time [s]')
+    plt.ylabel('Observer tuning (scaling)')
+    plt.title('Observer tuning over time (RL agent)')
+    plt.legend()
+    plt.grid(True)
+
+# --- Plot induced measurement noise (observer), delt opp i posisjon og fart ---
+observer = env.assets[0].ship_model.observer
+
+# Plot new observer noise logs (white, bias, total) in English
+from utils.plot_simulation import plot_observer_noise_logs
+if hasattr(observer, 'white_noise_log') and len(observer.white_noise_log) > 0:
+    plot_observer_noise_logs(observer, show=True)
+
+# Show all figures at once after simulation and plotting are fully complete.
 plt.show()
