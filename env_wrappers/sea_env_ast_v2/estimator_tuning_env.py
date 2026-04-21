@@ -1,5 +1,5 @@
 """
-AST environment variant where the RL agent perturbs the observer instead of the sea environment.
+AST environment variant where the RL agent tunes the state estimator instead of the sea environment.
 """
 from __future__ import annotations
 
@@ -10,26 +10,28 @@ from gymnasium.spaces import Box
 from env_wrappers.sea_env_ast_v2.env import SeaEnvASTv2
 
 
-class SeaEnvObserverAST(SeaEnvASTv2):
+class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
     """
     RL agent tunes observer covariance instead of environmental loads.
-    Action: [alpha_r_pos, alpha_r_speed, alpha_q]
+    Action: [alpha_r_pos, alpha_r_yaw, alpha_r_speed, alpha_q]
       - alpha_r_pos   : scale for position measurement covariance (R[0,0], R[1,1])
-      - alpha_r_speed : scale for speed measurement covariance (R[2,2])
+      - alpha_r_yaw   : scale for heading measurement covariance (R[2,2])
+      - alpha_r_speed : scale for speed measurement covariance (R[3,3])
       - alpha_q       : scale for process covariance (Q)
     """
     def init_action_space(self):
-        # Action controls dimensionless covariance multipliers.
+        # Action controls normalized covariance multipliers in [-1, 1].
         self.obs_tuning_range = {
-            "r_pos": np.array([0.01, 10.0], dtype=np.float32),
-            "r_speed": np.array([0.01, 10.0], dtype=np.float32),
-            "q": np.array([0.01, 10.0], dtype=np.float32)
+            "r_pos": np.array([0.2, 5.0], dtype=np.float32),
+            "r_yaw": np.array([0.2, 5.0], dtype=np.float32),
+            "r_speed": np.array([0.2, 5.0], dtype=np.float32),
+            "q": np.array([0.2, 5.0], dtype=np.float32)
         }
-        self.obs_tuning_nominal = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+        self.obs_tuning_nominal = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
         self.obs_tuning_prev = self.obs_tuning_nominal.copy()
         self.action_space = Box(
-            low=np.array([self.obs_tuning_range["r_pos"][0], self.obs_tuning_range["r_speed"][0], self.obs_tuning_range["q"][0]], dtype=np.float32),
-            high=np.array([self.obs_tuning_range["r_pos"][1], self.obs_tuning_range["r_speed"][1], self.obs_tuning_range["q"][1]], dtype=np.float32)
+            low=np.array([-1.0, -1.0, -1.0, -1.0], dtype=np.float32),
+            high=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
         )
         # Track cumulative observer tuning (noise) for the episode
         self.cumulative_noise = 0.0
@@ -38,34 +40,45 @@ class SeaEnvObserverAST(SeaEnvASTv2):
     # _clip_tuning_step fjernet: ingen begrensning på endring per steg
 
     def _denormalize_action(self, action_norm):
-        alpha_r_pos = self._denormalize(action_norm[0], self.obs_tuning_range["r_pos"][0], self.obs_tuning_range["r_pos"][1])
-        alpha_r_speed = self._denormalize(action_norm[1], self.obs_tuning_range["r_speed"][0], self.obs_tuning_range["r_speed"][1])
-        alpha_q = self._denormalize(action_norm[2], self.obs_tuning_range["q"][0], self.obs_tuning_range["q"][1])
-        return alpha_r_pos, alpha_r_speed, alpha_q
+        action_arr = np.asarray(action_norm, dtype=np.float32).reshape(-1)
+        # Backward compatibility with older 3-action policies: keep yaw tuning nominal.
+        if action_arr.size == 3:
+            action_arr = np.array([action_arr[0], self._normalize(1.0, self.obs_tuning_range["r_yaw"][0], self.obs_tuning_range["r_yaw"][1]), action_arr[1], action_arr[2]], dtype=np.float32)
+        alpha_r_pos = self._denormalize(action_arr[0], self.obs_tuning_range["r_pos"][0], self.obs_tuning_range["r_pos"][1])
+        alpha_r_yaw = self._denormalize(action_arr[1], self.obs_tuning_range["r_yaw"][0], self.obs_tuning_range["r_yaw"][1])
+        alpha_r_speed = self._denormalize(action_arr[2], self.obs_tuning_range["r_speed"][0], self.obs_tuning_range["r_speed"][1])
+        alpha_q = self._denormalize(action_arr[3], self.obs_tuning_range["q"][0], self.obs_tuning_range["q"][1])
+        return alpha_r_pos, alpha_r_yaw, alpha_r_speed, alpha_q
 
     def _normalize_action(self, action):
-        alpha_r_pos, alpha_r_speed, alpha_q = action
+        alpha_r_pos, alpha_r_yaw, alpha_r_speed, alpha_q = action
         a0 = self._normalize(alpha_r_pos, self.obs_tuning_range["r_pos"][0], self.obs_tuning_range["r_pos"][1])
-        a1 = self._normalize(alpha_r_speed, self.obs_tuning_range["r_speed"][0], self.obs_tuning_range["r_speed"][1])
-        a2 = self._normalize(alpha_q, self.obs_tuning_range["q"][0], self.obs_tuning_range["q"][1])
-        return a0, a1, a2
+        a1 = self._normalize(alpha_r_yaw, self.obs_tuning_range["r_yaw"][0], self.obs_tuning_range["r_yaw"][1])
+        a2 = self._normalize(alpha_r_speed, self.obs_tuning_range["r_speed"][0], self.obs_tuning_range["r_speed"][1])
+        a3 = self._normalize(alpha_q, self.obs_tuning_range["q"][0], self.obs_tuning_range["q"][1])
+        return a0, a1, a2, a3
 
     def _apply_observer_tuning(self, action):
         # Ingen begrensning på endring per steg, kun range
         action_arr = np.asarray(action, dtype=np.float32)
         low = np.array([
             self.obs_tuning_range["r_pos"][0],
+            self.obs_tuning_range["r_yaw"][0],
             self.obs_tuning_range["r_speed"][0],
             self.obs_tuning_range["q"][0]
         ], dtype=np.float32)
         high = np.array([
             self.obs_tuning_range["r_pos"][1],
+            self.obs_tuning_range["r_yaw"][1],
             self.obs_tuning_range["r_speed"][1],
             self.obs_tuning_range["q"][1]
         ], dtype=np.float32)
         clipped = np.clip(action_arr, low, high)
+        # Calculate cumulative tuning change (|a_t - a_{t-1}|)
+        tuning_change = np.sum(np.abs(clipped - self.obs_tuning_prev))
+        self.cumulative_noise += tuning_change
         self.obs_tuning_prev = clipped.copy()
-        alpha_r_pos, alpha_r_speed, alpha_q = tuple(float(value) for value in clipped)
+        alpha_r_pos, alpha_r_yaw, alpha_r_speed, alpha_q = tuple(float(value) for value in clipped)
         self._require_observer_attached()
         observer = self.assets[0].ship_model.observer
 
@@ -77,22 +90,24 @@ class SeaEnvObserverAST(SeaEnvASTv2):
 
         # Apply tunings (keep matrices diagonal/positive)
         observer.Q = observer.Q_nominal * float(alpha_q)
+        assert hasattr(observer.Q, 'ndim') and observer.Q.ndim == 2, f"observer.Q har feil dimensjon: {getattr(observer.Q, 'shape', None)}"
         observer.R = observer.R_nominal.copy()
         observer.R[0, 0] = observer.R_nominal[0, 0] * float(alpha_r_pos)
         observer.R[1, 1] = observer.R_nominal[1, 1] * float(alpha_r_pos)
-        observer.R[2, 2] = observer.R_nominal[2, 2] * float(alpha_r_speed)
+        observer.R[2, 2] = observer.R_nominal[2, 2] * float(alpha_r_yaw)
+        observer.R[3, 3] = observer.R_nominal[3, 3] * float(alpha_r_speed)
 
         # No direct signal tampering in this mode.
         self.assets[0].ship_model.observer_noise_std = np.zeros(3, dtype=float)
 
-        return alpha_r_pos, alpha_r_speed, alpha_q
+        return alpha_r_pos, alpha_r_yaw, alpha_r_speed, alpha_q
 
     def _require_observer_attached(self):
         if not self.assets or self.assets[0].ship_model is None:
             raise RuntimeError("Observer scenario requires at least one ship asset with a ship model.")
         if getattr(self.assets[0].ship_model, "observer", None) is None:
             raise RuntimeError(
-                "SeaEnvObserverAST requires an attached observer on assets[0].ship_model.observer. "
+                "SeaEnvEstimatorTuningAST requires an attached observer on assets[0].ship_model.observer. "
                 "Attach ShipObserverEKF in setup before training/simulation."
             )
 
@@ -129,8 +144,7 @@ class SeaEnvObserverAST(SeaEnvASTv2):
         action = self._denormalize_action(action_norm)
         action = self._apply_observer_tuning(action)
 
-        # Update cumulative noise (sum of absolute deviation from nominal for all tuning params)
-        self.cumulative_noise += np.sum(np.abs(np.array(action) - self.obs_tuning_nominal))
+        # cumulative_noise is now updated in _apply_observer_tuning
 
         #------------------------------ Step the simulator ------------------------------#
 
@@ -177,7 +191,7 @@ class SeaEnvObserverAST(SeaEnvASTv2):
                         speed_tol_mps=1.2,
                         pos_err_penalty=0.0002,
                         speed_err_penalty=0.05,
-                        cumulative_noise_penalty=0.1):
+                        cumulative_noise_penalty=0.2):
         # Reward based on progress + gradual path-deviation reward + realism penalty
         base_reward = len(self.action_list) * eta * theta
         reward = base_reward

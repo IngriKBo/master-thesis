@@ -484,7 +484,7 @@ class ShipModel(BaseShipModel):
                  desired_speed=8.0,
                  cross_track_error_tolerance=500,
                  nav_fail_time=600,
-                 traj_threshold_coeff=2.0,
+                 traj_threshold_coeff=4.0,
                  map_obj=None,
                  colav_mode=None,
                  print_status=True,
@@ -826,7 +826,7 @@ class ShipModel(BaseShipModel):
                     nav_warn_now = False   # once failed, no longer "warning"
                     if self.print_status and not getattr(self, '_navfail_printed', False):
                         print(self.name_tag, 'in', self.ship_machinery_model.operating_mode,
-                            'experiences navigational failure.')
+                            'experiences navigational failure (condition 1: time in warning zone).')
                         self._navfail_printed = True
 
             else:
@@ -850,7 +850,7 @@ class ShipModel(BaseShipModel):
                 nav_warn_now = False  # once we declare failure, we treat it as no longer "just warning"
                 if self.print_status and not getattr(self, '_navfail_printed', False):
                     print(self.name_tag, 'in', self.ship_machinery_model.operating_mode,
-                        'experiences navigational failure.')
+                        'experiences navigational failure (condition 2: travel distance > threshold).')
                     self._navfail_printed = True
 
             # 3) Record exactly once per tick (keep arrays aligned with self.t)
@@ -910,6 +910,7 @@ class ShipModel(BaseShipModel):
             for asset_info in asset_infos:
                 if asset_info is self or asset_info.name_tag == self.name_tag:
                     continue
+                dist = np.sqrt((self.north - asset_info.current_north)**2 + (self.east - asset_info.current_east)**2)
                 if check_condition.is_ship_collision(
                     (self.north, self.east),
                     (asset_info.current_north, asset_info.current_east),
@@ -1115,8 +1116,9 @@ class ShipModel(BaseShipModel):
                 self.yaw_angle,
                 max(0.0, measured_speed)
             ], dtype=float)
+            noisy_measurement = self.observer.apply_measurement_noise(measurement)
             self.observer.predict()
-            self.observer.update(measurement)
+            self.observer.update(noisy_measurement)
             self.estimated_north = float(self.observer.x[0])
             self.estimated_east = float(self.observer.x[1])
             self.estimated_heading = float(self.observer.x[2])

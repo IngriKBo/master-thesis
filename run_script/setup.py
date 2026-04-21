@@ -286,9 +286,9 @@ def get_env_assets(args, print_ship_status=False):
 
     assets: List[ShipAsset] = [own_ship_asset, passive_ship_asset]
 
-    # --- Bruk ObserverTwoShipsEnv ---
-    from env_wrappers.sea_env_ast_v2.observer_two_ships_env import ObserverTwoShipsEnv
-    env = ObserverTwoShipsEnv(
+    # --- Use the two-ship estimator tuning environment ---
+    from env_wrappers.sea_env_ast_v2.two_ships_estimator_tuning_env import TwoShipsEstimatorTuningEnv
+    env = TwoShipsEstimatorTuningEnv(
         assets=assets,
         map=map,
         wave_model_config=wave_model_config,

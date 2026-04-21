@@ -8,8 +8,10 @@ sys.path.insert(0, str(ROOT))
 
 ### IMPORT SIMULATOR ENVIRONMENTS
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
-from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
-from env_wrappers.sea_env_ast_v2.observer_two_ships_env import ObserverTwoShipsEnv
+from env_wrappers.sea_env_ast_v2.estimator_tuning_env import SeaEnvEstimatorTuningAST
+from env_wrappers.sea_env_ast_v2.measurement_noise_env import SeaEnvMeasurementNoiseAST
+from env_wrappers.sea_env_ast_v2.two_ships_measurement_noise_env import TwoShipsMeasurementNoiseEnv
+from env_wrappers.sea_env_ast_v2.two_ships_estimator_tuning_env import TwoShipsEstimatorTuningEnv
 from env_wrappers.sea_env_ast_v1.env import SeaEnvAST
 
 from simulator.ship_in_transit.sub_systems.ship_model import  ShipConfiguration, SimulationConfiguration, ShipModel
@@ -32,25 +34,59 @@ import numpy as np
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
+
+DEFAULT_OBSERVER_NOISE_PROFILE = 'realistic'
+OBSERVER_NOISE_PROFILES = {
+    'optimistic': {
+        'measurement_noise_std': np.array([0.75, 0.75, np.deg2rad(0.35), 0.03], dtype=float),
+        'bias_noise_std': np.array([0.005, 0.005, np.deg2rad(0.01), 0.0005], dtype=float),
+    },
+    'realistic': {
+        'measurement_noise_std': np.array([1.5, 1.5, np.deg2rad(0.60), 0.05], dtype=float),
+        'bias_noise_std': np.array([0.010, 0.010, np.deg2rad(0.02), 0.0010], dtype=float),
+    },
+    'conservative': {
+        'measurement_noise_std': np.array([3.0, 3.0, np.deg2rad(0.90), 0.10], dtype=float),
+        'bias_noise_std': np.array([0.020, 0.020, np.deg2rad(0.03), 0.0020], dtype=float),
+    },
+}
+
+
+def get_observer_noise_config(profile_name=DEFAULT_OBSERVER_NOISE_PROFILE):
+    profile_key = str(profile_name).strip().lower()
+    if profile_key not in OBSERVER_NOISE_PROFILES:
+        raise ValueError(
+            f"Unknown observer noise profile '{profile_name}'. "
+            f"Available: {list(OBSERVER_NOISE_PROFILES.keys())}"
+        )
+    profile = OBSERVER_NOISE_PROFILES[profile_key]
+    return {
+        'name': profile_key,
+        'measurement_noise_std': profile['measurement_noise_std'].copy(),
+        'bias_noise_std': profile['bias_noise_std'].copy(),
+    }
+
 # ============================================
 # Environment Scenarios Registry
 # Add new scenarios here as key-value pairs
 # ============================================
 ENVIRONMENT_SCENARIOS = {
-    'observer': SeaEnvObserverAST,
-    'observer_two_ships': ObserverTwoShipsEnv,
+    'estimator_tuning': SeaEnvEstimatorTuningAST,
+    'measurement_noise': SeaEnvMeasurementNoiseAST,
+    'measurement_noise_two_ships': TwoShipsMeasurementNoiseEnv,
+    'estimator_tuning_two_ships': TwoShipsEstimatorTuningEnv,
     'wave': SeaEnvAST,
     # Add more scenarios here: 'scenario_name': EnvironmentClass
 }
 
-def get_env_assets(args, print_ship_status=False, scenario='observer'):
+def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
     """
     Get environment and assets for training/simulation.
     
     Args:
         args: Command line arguments
         print_ship_status: Whether to print ship status (bool)
-        scenario: Environment scenario name - 'observer' or 'wave' (str)
+        scenario: Environment scenario name such as 'estimator_tuning', 'measurement_noise', or 'wave' (str)
     
     Returns:
         env, assets, map_gdfs
@@ -194,12 +230,14 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
     ## Own ship
     own_ship_route_filename = 'Stangvik_AST_reversed.txt'
     own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
+    own_route_data = np.loadtxt(own_ship_route_name)
 
-    start_E, start_N = np.loadtxt(own_ship_route_name)[0]  # expecting two columns: east, north
+    start_E = own_route_data[0, 0]
+    start_N = own_route_data[0, 1]
 
     own_ship_config = SimulationConfiguration(
-        initial_north_position_m=start_E,
-        initial_east_position_m=start_N,
+        initial_north_position_m=start_N,
+        initial_east_position_m=start_E,
         initial_yaw_angle_rad=np.deg2rad(-60.0),
         initial_forward_speed_m_per_s=0.0,
         initial_sideways_speed_m_per_s=0.0,
@@ -233,7 +271,7 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
         throttle_controller_gain=own_ship_throttle_controller_gains,
         heading_controller_gain=own_ship_heading_controller_gains,
         los_parameters=own_ship_los_guidance_parameters,
-        name_tag='Own ship',
+        name_tag='Observer Ship',
         route_name=own_ship_route_name,
         engine_steps_per_time_step=args.engine_step_count,
         initial_propeller_shaft_speed_rad_per_s=own_ship_initial_propeller_shaft_speed * np.pi /30,
@@ -247,8 +285,19 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
     )
 
 
-    # Attach EKF observer when training/evaluating observer scenario
-    if scenario in ['observer', 'observer_two_ships']:
+    if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
+        own_ship.auto_pilot.navigate.east = own_route_data[:, 0].tolist()
+        own_ship.auto_pilot.navigate.north = own_route_data[:, 1].tolist()
+
+    # Attach EKF observer when training/evaluating observer scenarios
+    if scenario in ['estimator_tuning', 'measurement_noise', 'estimator_tuning_two_ships', 'measurement_noise_two_ships']:
+        observer_noise_cfg = get_observer_noise_config(
+            getattr(args, 'observer_noise_profile', DEFAULT_OBSERVER_NOISE_PROFILE)
+        )
+        meas_noise_std = observer_noise_cfg['measurement_noise_std']
+        bias_noise_std = observer_noise_cfg['bias_noise_std']
+        q_obs = np.diag([0.01, 0.01, 1e-4, 0.05, 0.05, 0.01])
+        r_obs = np.diag(meas_noise_std**2)
         own_ship.observer = ShipObserverEKF(
             dt=own_ship.int.dt,
             x0=np.array([
@@ -258,8 +307,12 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
                 own_ship.forward_speed,
                 own_ship.sideways_speed,
                 own_ship.yaw_rate
-            ], dtype=float)
+            ], dtype=float),
+            Q=q_obs,
+            R=r_obs
         )
+        own_ship.observer.measurement_noise_std = meas_noise_std
+        own_ship.observer.bias_noise_std = bias_noise_std
         own_ship.use_observer_for_control = True
 
     own_ship_info = AssetInfo(
@@ -283,14 +336,17 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
 
     # Package the assets for reinforcement learning agent
 
-    if scenario == 'observer_two_ships':
-        # --- Ship 2: Motsatt path av skip 1 ---
-        route2_filename = 'Stangvik_AST.txt'  # motsatt rute av own_ship
+    if scenario in ['observer_two_ships', 'observer_noise_two_ships']:
+        # Ship 2 follows the same route in the opposite direction without observer/noise manipulation,
+        # but still uses its nominal collision-avoidance controller.
+        route2_filename = 'Stangvik_AST.txt'
         route2_path = get_ship_route_path(ROOT, route2_filename)
-        start_E2, start_N2 = np.loadtxt(route2_path)[0]
+        route2_data = np.loadtxt(route2_path)
+        start_E2 = route2_data[0, 0]
+        start_N2 = route2_data[0, 1]
         ship2_config = SimulationConfiguration(
-            initial_north_position_m=start_E2,
-            initial_east_position_m=start_N2,
+            initial_north_position_m=start_N2,
+            initial_east_position_m=start_E2,
             initial_yaw_angle_rad=np.deg2rad(120.0),  # motsatt retning
             initial_forward_speed_m_per_s=0.0,
             initial_sideways_speed_m_per_s=0.0,
@@ -320,6 +376,9 @@ def get_env_assets(args, print_ship_status=False, scenario='observer'):
             colav_mode='sbmpc',
             print_status=print_ship_status
         )
+        if hasattr(ship2, 'auto_pilot') and hasattr(ship2.auto_pilot, 'navigate'):
+            ship2.auto_pilot.navigate.east = route2_data[:, 0].tolist()
+            ship2.auto_pilot.navigate.north = route2_data[:, 1].tolist()
         ship2_info = AssetInfo(
             current_north=ship2.north,
             current_east=ship2.east,

@@ -5,7 +5,7 @@ import geopandas as gpd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
+from env_wrappers.sea_env_ast_v2.estimator_tuning_env import SeaEnvEstimatorTuningAST
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
 from simulator.ship_in_transit.sub_systems.ship_model import ShipConfiguration, SimulationConfiguration, ShipModel
 from simulator.ship_in_transit.sub_systems.ship_engine import MachinerySystemConfiguration, MachineryMode, MachineryModeParams, MachineryModes, SpecificFuelConsumptionBaudouin6M26Dot3, SpecificFuelConsumptionWartila6L26, RudderConfiguration
@@ -245,7 +245,7 @@ own_ship_asset = ShipAsset(
 )
 assets: List[ShipAsset] = [own_ship_asset]
 
-env = SeaEnvObserverAST(
+env = SeaEnvEstimatorTuningAST(
     assets=assets,
     map=map,
     wave_model_config=wave_model_config,

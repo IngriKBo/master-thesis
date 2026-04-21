@@ -103,6 +103,13 @@ class NavigationSystem:
             a ship heading controller). The parameter "k" is the
             index of the next waypoint.
         '''
+        if k >= len(self.north) - 1:
+            north_err = self.north[-1] - x
+            east_err = self.east[-1] - y
+            self.e_ct = 0.0
+            self.e_ct_int = 0.0
+            return _wrap_to_pi(math.atan2(east_err, north_err))
+
         dx = self.north[k] - self.north[k - 1]
         dy = self.east[k] - self.east[k - 1]
         alpha_k = math.atan2(dy, dx)

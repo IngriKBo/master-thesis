@@ -1,7 +1,3 @@
-import matplotlib as mpl
-mpl.rcParams['pdf.fonttype'] = 42    # Use TrueType instead of Type 3
-mpl.rcParams['ps.fonttype'] = 42
-mpl.rcParams['font.family'] = 'Arial' #'DejaVu Sans'  # Or: 'Arial', 'Helvetica'
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -385,66 +381,60 @@ def plot_ship_and_real_map(
     ax.set_aspect("equal", adjustable="box")
 
     # --- ship trajectories ---------------------------------------------------
-    own_color   = "#0c3c78"   # dark blue for actual ship path
+    ship_colors = ["#0c3c78", "#f08c00", "#2b8a3e", "#9c36b5"]
     route_color = "#d90808"   # orange for mission trajectory / waypoints
 
-    own_handle = None
+    ship_handles = []
     route_handle = None
 
 
 
     for i, asset in enumerate(assets):
+        ship_color = ship_colors[i % len(ship_colors)]
+        ship_zorder = 12 if i == 0 else 10 - i
+        outline_zorder = 11 if i == 0 else 7 - i
         # actual sailed track
         east_vals = result_dfs[i]["east position [m]"].to_numpy()
         north_vals = result_dfs[i]["north position [m]"].to_numpy()
-        print(f"[PLOT DEBUG] east_vals (min, max): {east_vals.min()}, {east_vals.max()}")
-        print(f"[PLOT DEBUG] north_vals (min, max): {north_vals.min()}, {north_vals.max()}")
-        print(f"[PLOT DEBUG] east_vals (first 5): {east_vals[:5]}")
-        print(f"[PLOT DEBUG] north_vals (first 5): {north_vals[:5]}")
         # Plot as line (swap to east=x, north=y)
         line, = ax.plot(
             north_vals,  # x-axis: north
             east_vals,   # y-axis: east
-            color=own_color,
+            color=ship_color,
             lw=1.6,  # thinner line
             alpha=1.0,
-            zorder=10,
-            label="Own ship" if own_handle is None else "_nolegend_",
+            zorder=ship_zorder,
+            label=asset.info.name_tag,
         )
-        if own_handle is None:
-            own_handle = line
+        ship_handles.append(line)
 
-    # Print axis limits after plotting
-    print(f"[PLOT DEBUG] ax.get_xlim(): {ax.get_xlim()}")
-    print(f"[PLOT DEBUG] ax.get_ylim(): {ax.get_ylim()}")
-
-    # planned/mission trajectory from autopilot
-    if asset.ship_model.auto_pilot is not None:
-        route_line, = ax.plot(
-            asset.ship_model.auto_pilot.navigate.north,  # x-axis: north
-            asset.ship_model.auto_pilot.navigate.east,   # y-axis: east
-            linestyle="--",
-            lw=1.8,
-            alpha=0.95,
-            color=route_color,
-            zorder=5,
-            label="Mission trajectory" if route_handle is None else "_nolegend_",
-        )
-        ax.scatter(
-            asset.ship_model.auto_pilot.navigate.north,
-            asset.ship_model.auto_pilot.navigate.east,
-            marker="x",
-            s=30,
-            linewidths=1.6,
-            color=route_color,
-            zorder=6,
-        )
-        if route_handle is None:
-            route_handle = route_line
+        # planned/mission trajectory from autopilot
+        if asset.ship_model.auto_pilot is not None:
+            route_line, = ax.plot(
+                asset.ship_model.auto_pilot.navigate.north,  # x-axis: north
+                asset.ship_model.auto_pilot.navigate.east,   # y-axis: east
+                linestyle="--",
+                lw=1.8,
+                alpha=0.95,
+                color=route_color,
+                zorder=5,
+                label="Mission trajectory" if route_handle is None else "_nolegend_",
+            )
+            ax.scatter(
+                asset.ship_model.auto_pilot.navigate.north,
+                asset.ship_model.auto_pilot.navigate.east,
+                marker="x",
+                s=30,
+                linewidths=1.6,
+                color=route_color,
+                zorder=6,
+            )
+            if route_handle is None:
+                route_handle = route_line
 
         # ship outlines along the path
         for x, y in zip(asset.ship_model.ship_drawings[1], asset.ship_model.ship_drawings[0]):
-            ax.plot(x, y, color=own_color, lw=1.0, zorder=7)
+            ax.plot(x, y, color=ship_color, lw=1.0, zorder=outline_zorder)
 
     # --- axes, labels, legend -----------------------------------------------
     ax.set_axis_on()
@@ -468,7 +458,9 @@ def plot_ship_and_real_map(
     ax.tick_params(axis="both", which="major", labelsize=tick_fs, length=3)
 
     # legend (only if we have handles)
-    handles = [h for h in (own_handle, route_handle) if h is not None]
+    handles = [*ship_handles]
+    if route_handle is not None:
+        handles.append(route_handle)
     labels = [h.get_label() for h in handles]
     if handles:
         lg = ax.legend(handles, labels,
@@ -491,3 +483,37 @@ def plot_ship_and_real_map(
     fig.tight_layout(pad=0.05)
 
     return fig, ax
+
+def plot_observer_noise_logs(observer, time=None, show=True):
+    """
+    Plots the high-frequency (white), low-frequency (bias), and total noise for each measurement channel.
+    Args:
+        observer: The observer instance with noise logs.
+        time: Optional time vector. If None, uses np.arange(len(log)).
+        show: Whether to call plt.show().
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    white = np.array(observer.white_noise_log)
+    bias = np.array(observer.bias_log)
+    total = np.array(observer.total_noise_log)
+    n_steps, n_channels = white.shape
+    if time is None:
+        time = np.arange(n_steps)
+    channel_names = ["North", "East", "Yaw", "Speed"]
+    fig, axs = plt.subplots(n_channels, 3, figsize=(15, 2.5 * n_channels), sharex=True)
+    for i in range(n_channels):
+        axs[i, 0].plot(time, white[:, i])
+        axs[i, 0].set_title(f"White noise: {channel_names[i]}")
+        axs[i, 1].plot(time, bias[:, i])
+        axs[i, 1].set_title(f"Bias (low-freq): {channel_names[i]}")
+        axs[i, 2].plot(time, total[:, i])
+        axs[i, 2].set_title(f"Total noise: {channel_names[i]}")
+        for j in range(3):
+            axs[i, j].set_ylabel("Noise value")
+            axs[i, j].set_xlabel("Time step" if time is None else "Time [s]")
+            axs[i, j].grid(True, alpha=0.5)
+    fig.suptitle("Observer Measurement Noise Components", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    if show:
+        plt.show()

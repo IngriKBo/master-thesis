@@ -2,13 +2,12 @@ from pathlib import Path
 import sys
 import geopandas as gpd
 
-## PATH HELPER (OBLIGATORY)
-# project root = two levels up from this file
+# PATH HELPER (OBLIGATORISK)
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-### IMPORT SIMULATOR ENVIRONMENTS
-from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
+# IMPORT SIMULATOR-ENVIRONMENTS
+from env_wrappers.sea_env_ast_v2.estimator_tuning_env import SeaEnvEstimatorTuningAST
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
 
 from simulator.ship_in_transit.sub_systems.ship_model import ShipConfiguration, SimulationConfiguration, ShipModel
@@ -21,17 +20,14 @@ from simulator.ship_in_transit.sub_systems.current_model import CurrentModelConf
 from simulator.ship_in_transit.sub_systems.wind_model import WindModelConfiguration
 from simulator.ship_in_transit.sub_systems.observers import ShipObserverEKF
 
-## IMPORT FUNCTIONS
 from utils.get_path import get_ship_route_path, get_map_path
 from utils.prepare_map import get_gdf_from_gpkg, get_polygon_from_gdf
 from utils.animate import MapAnimator, PolarAnimator, animate_side_by_side
 from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
-
-## RL
+from test_beds.ast_test.setup import get_observer_noise_config, DEFAULT_OBSERVER_NOISE_PROFILE
 
 from stable_baselines3 import SAC
 
-### IMPORT TOOLS
 import argparse
 from typing import List
 import numpy as np
@@ -40,63 +36,44 @@ import matplotlib.pyplot as plt
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
-
-###############################################################################
-
 # Argument Parser
-parser = argparse.ArgumentParser(description='Ship in Transit Simulation (trained agent)')
+parser = argparse.ArgumentParser(description='Single-ship estimator tuning stress test')
 
-## Add arguments for environments
-parser.add_argument('--time_step', type=int, default=5, metavar='TIMESTEP',
-                    help='ENV: time step size in second for ship transit simulator (default: 5)')
-parser.add_argument('--engine_step_count', type=int, default=10, metavar='ENGINE_STEP_COUNT',
-                    help='ENV: engine integration step count in between simulation timestep (default: 10)')
-parser.add_argument('--radius_of_acceptance', type=int, default=300, metavar='ROA',
-                    help='ENV: radius of acceptance in meter for LOS algorithm (default: 300)')
-parser.add_argument('--lookahead_distance', type=int, default=1000, metavar='LD',
-                    help='ENV: lookahead distance in meter for LOS algorithm (default: 1000)')
-parser.add_argument('--nav_fail_time', type=int, default=300, metavar='NAV_FAIL_TIME',
-                    help='ENV: Allowed recovery time in second from navigational failure warning condition (default: 300)')
-parser.add_argument('--ship_draw', type=bool, default=True, metavar='SHIP_DRAW',
-                    help='ENV: record ship drawing for plotting and animation (default: True)')
-parser.add_argument('--time_since_last_ship_drawing', default=30, metavar='SHIP_DRAW_TIME',
-                    help='ENV: time delay in second between ship drawing record (default: 30)')
-
-# Add arguments for AST-core
-parser.add_argument('--warm_up_time', type=int, default=2500, metavar='WARM_UP_TIME',
-                    help='AST: time needed in second before policy - action sampling takes place (default: 1500)')
-parser.add_argument('--action_sampling_period', type=int, default=900, metavar='ACT_SAMPLING_PERIOD',
-                    help='AST: time period in second between policy - action sampling (default: 900, matches training)')
-parser.add_argument('--model_path', type=str, default=None, metavar='MODEL_PATH',
-                    help='AST: path to model zip (or path without .zip). If omitted, uses a fixed trained_model run path')
+parser.add_argument('--time_step', type=int, default=5)
+parser.add_argument('--engine_step_count', type=int, default=10)
+parser.add_argument('--radius_of_acceptance', type=int, default=300)
+parser.add_argument('--lookahead_distance', type=int, default=1000)
+parser.add_argument('--nav_fail_time', type=int, default=300)
+parser.add_argument('--ship_draw', type=bool, default=True)
+parser.add_argument('--time_since_last_ship_drawing', default=30)
+parser.add_argument('--warm_up_time', type=int, default=2500)
+parser.add_argument('--action_sampling_period', type=int, default=900)
+parser.add_argument('--model_path', type=str, default=None)
+parser.add_argument('--observer_noise_profile', type=str, default=DEFAULT_OBSERVER_NOISE_PROFILE,
+                    choices=['optimistic', 'realistic', 'conservative'])
 
 args = parser.parse_args()
 
-# -----------------------
-# GPKG settings (edit if your layer names differ)
-# -----------------------
-GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")       # <-- put your file here (or absolute path)
+# Kart og rute
+GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")
 FRAME_LAYER = "frame_3857"
 OCEAN_LAYER = "ocean_3857"
 LAND_LAYER  = "land_3857"
-COAST_LAYER = "coast_3857"               # optional
-WATER_LAYER = "water_3857"               # optional
+COAST_LAYER = "coast_3857"
+WATER_LAYER = "water_3857"
 
 frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf = get_gdf_from_gpkg(GPKG_PATH, FRAME_LAYER, OCEAN_LAYER, LAND_LAYER, COAST_LAYER, WATER_LAYER)
 map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
+map_data = get_polygon_from_gdf(land_gdf)
+map = [PolygonObstacle(map_data), frame_gdf]
 
-# --- Kartdata: bruk (east, north) direkte til PolygonObstacle ---
-map_data = get_polygon_from_gdf(land_gdf)   # list of exterior rings (E,N)
-map = [PolygonObstacle(map_data), frame_gdf]              # <-- reuse your existing simulator map type
-
-# Engine configuration
-main_engine_capacity = 2160e3 #4160e3
-diesel_gen_capacity = 510e3 #610e3
+# Skip og maskinkonfig
+main_engine_capacity = 2160e3
+diesel_gen_capacity = 510e3
 hybrid_shaft_gen_as_generator = 'GEN'
 hybrid_shaft_gen_as_motor = 'MOTOR'
 hybrid_shaft_gen_as_offline = 'OFF'
 
-# Configure the simulation
 ship_config = ShipConfiguration(
     coefficient_of_deadweight_to_displacement=0.7,
     bunkers=200000,
@@ -135,7 +112,7 @@ current_model_config = CurrentModelConfiguration(
     timestep_size=args.time_step
 )
 wind_model_config = WindModelConfiguration(
-    initial_mean_wind_velocity=None,                    # Set to None to use a mean wind component
+    initial_mean_wind_velocity=None,
     mean_wind_velocity_decay_rate=0.025,
     mean_wind_velocity_standard_deviation=0.005,
     initial_wind_direction=np.deg2rad(0.0),
@@ -159,7 +136,6 @@ pto_mode_params = MachineryModeParams(
     name_tag='PTO'
 )
 pto_mode = MachineryMode(params=pto_mode_params)
-
 pti_mode_params = MachineryModeParams(
     main_engine_capacity=0,
     electrical_capacity=2*diesel_gen_capacity,
@@ -167,7 +143,6 @@ pti_mode_params = MachineryModeParams(
     name_tag='PTI'
 )
 pti_mode = MachineryMode(params=pti_mode_params)
-
 mec_mode_params = MachineryModeParams(
     main_engine_capacity=main_engine_capacity,
     electrical_capacity=diesel_gen_capacity,
@@ -175,9 +150,9 @@ mec_mode_params = MachineryModeParams(
     name_tag='MEC'
 )
 mec_mode = MachineryMode(params=mec_mode_params)
-mso_modes = MachineryModes(
-    [pto_mode, mec_mode, pti_mode]
-)
+mso_modes = MachineryModes([
+    pto_mode, mec_mode, pti_mode
+])
 fuel_spec_me = SpecificFuelConsumptionWartila6L26()
 fuel_spec_dg = SpecificFuelConsumptionBaudouin6M26Dot3()
 machinery_config = MachinerySystemConfiguration(
@@ -201,9 +176,23 @@ machinery_config = MachinerySystemConfiguration(
     specific_fuel_consumption_coefficients_dg=fuel_spec_dg.fuel_consumption_coefficients()
 )
 
-### CONFIGURE THE SHIP SIMULATION MODELS
-## Own ship
-# --- Set up route and controllers ---
+# Rute
+own_ship_route_filename = 'Stangvik_AST.txt'
+own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
+mission_traj = np.loadtxt(own_ship_route_name)
+start_E, start_N = mission_traj[0]
+
+own_ship_config = SimulationConfiguration(
+    initial_north_position_m=start_N,
+    initial_east_position_m=start_E,
+    initial_yaw_angle_rad=np.deg2rad(-60.0),
+    initial_forward_speed_m_per_s=0.0,
+    initial_sideways_speed_m_per_s=0.0,
+    initial_yaw_rate_rad_per_s=0.0,
+    integration_step=args.time_step,
+    simulation_time=20000,
+)
+
 own_ship_throttle_controller_gains = ThrottleControllerGains(
    kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001
 )
@@ -219,29 +208,6 @@ own_ship_cross_track_error_tolerance = 750
 own_ship_initial_propeller_shaft_speed = 0
 own_ship_initial_propeller_shaft_acceleration = 0
 
-
-
-# --- Load route and assign east/north correctly ---
-own_ship_route_filename = 'Stangvik_AST_reversed.txt'
-own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
-route_data = np.loadtxt(own_ship_route_name)  # expecting two columns: east, north
-# route_data[:,0] = east, route_data[:,1] = north
-start_E = route_data[0, 0]
-start_N = route_data[0, 1]
-own_ship_config = SimulationConfiguration(
-        initial_north_position_m=start_N,  # north from route file
-        initial_east_position_m=start_E,   # east from route file
-        initial_yaw_angle_rad=np.deg2rad(-60.0),
-        initial_forward_speed_m_per_s=0.0,
-        initial_sideways_speed_m_per_s=0.0,
-        initial_yaw_rate_rad_per_s=0.0,
-        integration_step=args.time_step,
-        simulation_time=20000,
-)
-
-# --- Instantiate ShipModel (auto_pilot will process the route) ---
-
-# --- Instantiate ShipModel (auto_pilot will process the route) ---
 own_ship = ShipModel(
     ship_config=ship_config,
     simulation_config=own_ship_config,
@@ -265,14 +231,12 @@ own_ship = ShipModel(
     print_status=True
 )
 
-# --- Ensure autopilot waypoints are set as east/north ---
 if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
-    own_ship.auto_pilot.navigate.east = route_data[:, 0].tolist()
-    own_ship.auto_pilot.navigate.north = route_data[:, 1].tolist()
+    own_ship.auto_pilot.navigate.east = mission_traj[:, 0].tolist()
+    own_ship.auto_pilot.navigate.north = mission_traj[:, 1].tolist()
 
-
-# Attach observer to own ship only
-# Q og R brukes for tuning, ikke for tilfeldig støy
+# Observer: initial tuning, will be changed by agent
+observer_noise_cfg = get_observer_noise_config(args.observer_noise_profile)
 own_ship.observer = ShipObserverEKF(
     dt=own_ship.int.dt,
     x0=np.array([
@@ -285,41 +249,27 @@ own_ship.observer = ShipObserverEKF(
     ], dtype=float),
     P0=np.eye(6)*1e-3
 )
-# Sett eksplisitt måle-støy (std) på observeren: [north, east, yaw, speed]
-# Realistisk støy (std):
-#   - Posisjon: 1–5 meter (f.eks. GPS typisk 2–3 m std)
-#   - Yaw: 0.01–0.05 rad (0.5–3 grader)
-#   - Fart: 0.05–0.2 m/s (Doppler logg, GPS)
-own_ship.observer.measurement_noise_std = np.array([10.0, 10.0, 0.1, 0.6])  # Realistisk støy: [north, east, yaw, speed]
-own_ship.use_observer_for_control = True  # Nå bruker ColAV observerens (støyete) signaler
+own_ship.observer.measurement_noise_std = observer_noise_cfg['measurement_noise_std']
+own_ship.observer.bias_noise_std = observer_noise_cfg['bias_noise_std']
+own_ship.use_observer_for_control = True
 
 own_ship_info = AssetInfo(
-    # dynamic state (mutable)
     current_north       = own_ship.north,
     current_east        = own_ship.east,
     current_yaw_angle   = own_ship.yaw_angle,
     forward_speed       = own_ship.forward_speed,
     sideways_speed      = own_ship.sideways_speed,
-
-    # static properties (constants)
     name_tag            = own_ship.name_tag,
     ship_length         = own_ship.l_ship,
     ship_width          = own_ship.w_ship
 )
-# Wraps simulation objects based on the ship type using a dictionary
 own_ship_asset = ShipAsset(
     ship_model=own_ship,
     info=own_ship_info
 )
-
-# Package the assets for reinforcement learning agent
 assets: List[ShipAsset] = [own_ship_asset]
 
-################################### ENV SPACE ###################################
-
-# Initiate Multi-Ship Reinforcement Learning Environment Class Wrapper
-
-env = SeaEnvObserverAST(
+env = SeaEnvEstimatorTuningAST(
     assets=assets,
     map=map,
     wave_model_config=wave_model_config,
@@ -330,10 +280,7 @@ env = SeaEnvObserverAST(
     include_wind=True,
     include_current=True)
 
-
-# Posisjon er riktig her
-
-# Load trained model
+# Last inn agent som tuner observeren
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
@@ -341,24 +288,19 @@ else:
 
 model = SAC.load(model_load_path)
 
-# Run trained model
-
 # --- Record observer tuning history ---
 observer_tuning_history = []
 observer_tuning_times = []
-initial_tuning = [1.0, 1.0, 1.0]  # Reference (nominal) tuning
 
 obs, info = env.reset()
 step_idx = 0
 while True:
     action, _states = model.predict(obs, deterministic=True)
-    print(f"Step {step_idx}: Agent action (normalized): {action}")
     obs, reward, terminated, truncated, info = env.step(action)
-    # Print the denormalized observer tuning chosen by the agent for this action
+    # Logg observer-tuning
     if hasattr(env, 'action_list') and len(env.action_list) > 0:
         tuning = list(env.action_list[-1])
         observer_tuning_history.append(tuning)
-        # Use the time at which the action was sampled
         if hasattr(env, 'action_time_list') and len(env.action_time_list) > 0:
             t = env.action_time_list[-1]
         else:
@@ -372,73 +314,38 @@ while True:
         print(f"[DEBUG] Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}")
         break
 
-################################## GET RESULTS ##################################
-
-## Get the simulation results for all assets, and plot the asset simulation results
+# --- Plotting (samme som run_single_ship_map_observer) ---
 own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
 result_dfs = [own_ship_results_df]
 
-# Build both animations (don’t show yet)
-repeat=False
 map_anim = MapAnimator(
     assets=assets,
     map_gdfs=map_gdfs,
     interval_ms=500,
-    status_asset_index=0  # flags for own ship
+    status_asset_index=0
 )
 map_anim.run(fps=120, show=False, repeat=False)
 
 polar_anim = PolarAnimator(focus_asset=assets[0], interval_ms=500)
 polar_anim.run(fps=120, show=False, repeat=False)
 
-# Place windows next to each other, same height, centered
 animate_side_by_side(map_anim.fig, polar_anim.fig,
-                     left_frac=0.68,  # how wide the map window is
+                     left_frac=0.68,
                      height_frac=0.92,
                      gap_px=16,
                      show=False)
 
-# Plot 1: Trajectory + observer plots
-
-
-
 plot_ship_status(own_ship_asset, own_ship_results_df, plot_env_load=True, show=False)
-
-
 plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=False)
 
-
 # --- Plot observer tuning over time ---
-
-import matplotlib.pyplot as plt
-# Use full observer tuning history if available (logs every sim timestep)
-if hasattr(env, 'observer_tuning_full_history') and len(env.observer_tuning_full_history) > 0:
-    observer_tuning_history = np.array(env.observer_tuning_full_history)
-    observer_tuning_times = np.array(env.observer_tuning_full_times)
-else:
-    observer_tuning_history = np.array(observer_tuning_history)
-    observer_tuning_times = np.array(observer_tuning_times)
-
-if observer_tuning_history.shape[0] > 0:
-    plt.figure(figsize=(10, 5))
-    plt.step(observer_tuning_times, observer_tuning_history[:,0], where='post', label='alpha_r_pos')
-    plt.step(observer_tuning_times, observer_tuning_history[:,1], where='post', label='alpha_r_speed')
-    plt.step(observer_tuning_times, observer_tuning_history[:,2], where='post', label='alpha_q')
-    for i, name in enumerate(['alpha_r_pos', 'alpha_r_speed', 'alpha_q']):
-        plt.hlines(initial_tuning[i], observer_tuning_times[0], observer_tuning_times[-1], colors='k', linestyles='dashed', alpha=0.5, label=f'{name} reference' if i==0 else None)
-    plt.xlabel('Simulation time [s]')
-    plt.ylabel('Observer tuning (scaling)')
-    plt.title('Observer tuning over time (RL agent)')
-    plt.legend()
-    plt.grid(True)
-
-# --- Plot induced measurement noise (observer), delt opp i posisjon og fart ---
-observer = env.assets[0].ship_model.observer
-
-# Plot new observer noise logs (white, bias, total) in English
-from utils.plot_simulation import plot_observer_noise_logs
-if hasattr(observer, 'white_noise_log') and len(observer.white_noise_log) > 0:
-    plot_observer_noise_logs(observer, show=True)
-
-# Show all figures at once after simulation and plotting are fully complete.
+plt.figure()
+observer_tuning_history = np.array(observer_tuning_history)
+plt.plot(observer_tuning_times, observer_tuning_history[:,0], label='alpha_r_pos')
+plt.plot(observer_tuning_times, observer_tuning_history[:,1], label='alpha_r_speed')
+plt.plot(observer_tuning_times, observer_tuning_history[:,2], label='alpha_q')
+plt.xlabel('Tid (s)')
+plt.ylabel('Observer-tuning')
+plt.legend()
+plt.title('Observer-tuning valgt av agent')
 plt.show()

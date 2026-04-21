@@ -44,10 +44,6 @@ def is_pos_outside_horizon(map_obj:PolygonObstacle,
         
     is_outside = outside_n or outside_e
         
-    # Debug print for horizon check
-    print(f"[DEBUG][is_pos_outside_horizon] pos: north={n_pos}, east={e_pos}, margin={margin}")
-    print(f"[DEBUG][is_pos_outside_horizon] n_route_bound: {n_route_bound}, e_route_bound: {e_route_bound}")
-    print(f"[DEBUG][is_pos_outside_horizon] outside_n: {outside_n}, outside_e: {outside_e}, is_outside: {is_outside}")
     
     return is_outside
     

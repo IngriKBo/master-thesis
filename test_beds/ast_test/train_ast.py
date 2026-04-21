@@ -17,9 +17,7 @@ from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
 
 ## IMPORT AST RELATED TOOLS
 from stable_baselines3 import SAC
-from stable_baselines3.sac import MlpPolicy, MultiInputPolicy
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
-from gymnasium.wrappers import FlattenObservation, RescaleAction
 from gymnasium.utils.env_checker import check_env
 
 ### IMPORT TOOLS
@@ -32,6 +30,21 @@ import time
 from utils.get_path import get_trained_model_and_log_path
 from utils.logger import log_ast_training_config
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+
+
+SCENARIO_MODEL_NAMES = {
+    'observer': 'AST-observer-one-ship-train',
+    'observer_two_ships': 'AST-observer-two-ships-train',
+    'observer_noise': 'AST-observer-noise-one-ship-train',
+    'observer_noise_two_ships': 'AST-observer-noise-two-ships-train',
+}
+
+
+def resolve_model_name(args):
+    if args.model_name is not None:
+        return args.model_name
+    base_name = SCENARIO_MODEL_NAMES.get(args.scenario, 'AST-train')
+    return f"{base_name}-{args.observer_noise_profile}"
 
 
 class PercentProgressCallback(BaseCallback):
@@ -87,12 +100,14 @@ def parse_cli_args():
                         help='AST: total training timesteps (default: 25000)')
     parser.add_argument('--strict_env_check', action='store_true',
                         help='AST: abort training if gym check_env fails (default: continue with warning)')
-    parser.add_argument('--model_name', type=str, default='AST-observer-train-realistic', metavar='MODEL_NAME',
-                        help='AST: base name for this training run folder under trained_model (default: AST-observer-train-realistic)')
+    parser.add_argument('--model_name', type=str, default=None, metavar='MODEL_NAME',
+                        help='AST: base name for this training run folder under trained_model (default: auto-generated from scenario and noise profile)')
+    parser.add_argument('--observer_noise_profile', type=str, default='realistic', metavar='OBSERVER_NOISE_PROFILE',
+                        help='Observer noise profile: optimistic, realistic or conservative (default: realistic)')
 
     # Add argument for scenario
     parser.add_argument('--scenario', type=str, default='observer', metavar='SCENARIO',
-                        help='Scenario to train on: observer or observer_two_ships (default: observer)')
+                        help='Scenario to train on: observer, observer_two_ships, observer_noise or observer_noise_two_ships (default: observer)')
 
     # Parse args
     args = parser.parse_args()
@@ -109,20 +124,18 @@ if __name__ == "__main__":
 
 
     # Create unique output paths under trained_model/
-    model_name = args.model_name
+    model_name = resolve_model_name(args)
     model_path, log_path, tb_path = get_trained_model_and_log_path(root=ROOT, model_name=model_name)
 
     # Get the assets and AST Environment Wrapper, scenario from args
     env, assets, map_gdfs = get_env_assets(args=args, scenario=args.scenario)
 
-    # Set observer measurement noise for RL training (same as simulation)
-    # Values: [north, east, yaw, speed] (see run_single_ship_map_observer.py)
-    observer = assets[0].ship_model.observer
-    observer.measurement_noise_std = np.array([2.0, 2.0, 0.017, 0.1])
-
     # Hard safety check så vi aldri trener feil scenario ved et uhell
-    if type(env).__name__ not in ["SeaEnvObserverAST", "ObserverTwoShipsEnv"]:
-        raise RuntimeError(f"Wrong environment selected: {type(env).__name__}. Expected SeaEnvObserverAST or ObserverTwoShipsEnv.")
+    if type(env).__name__ not in ["SeaEnvEstimatorTuningAST", "SeaEnvMeasurementNoiseAST", "TwoShipsEstimatorTuningEnv", "TwoShipsMeasurementNoiseEnv"]:
+        raise RuntimeError(
+            f"Wrong environment selected: {type(env).__name__}. "
+            "Expected SeaEnvEstimatorTuningAST, SeaEnvMeasurementNoiseAST, TwoShipsEstimatorTuningEnv or TwoShipsMeasurementNoiseEnv."
+        )
     if env.assets[0].ship_model.observer is None:
         raise RuntimeError("Observer is not attached to ship model. Aborting observer-scenario training.")
 

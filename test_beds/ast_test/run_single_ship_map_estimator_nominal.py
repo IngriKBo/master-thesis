@@ -10,7 +10,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from env_wrappers.sea_env_ast_v2.observer_env import SeaEnvObserverAST
+from env_wrappers.sea_env_ast_v2.estimator_tuning_env import SeaEnvEstimatorTuningAST
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
 from simulator.ship_in_transit.sub_systems.ship_model import ShipConfiguration, SimulationConfiguration, ShipModel
 from simulator.ship_in_transit.sub_systems.ship_engine import MachinerySystemConfiguration, MachineryMode, MachineryModeParams, MachineryModes, SpecificFuelConsumptionBaudouin6M26Dot3, SpecificFuelConsumptionWartila6L26, RudderConfiguration
@@ -25,12 +25,13 @@ from utils.get_path import get_ship_route_path, get_map_path
 from utils.prepare_map import get_gdf_from_gpkg, get_polygon_from_gdf
 from utils.animate import MapAnimator, PolarAnimator, animate_side_by_side
 from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
+from test_beds.ast_test.setup import get_observer_noise_config, DEFAULT_OBSERVER_NOISE_PROFILE
 import argparse
 from typing import List
 
 parser = argparse.ArgumentParser(description='Ship in Transit Simulation (observer, no RL tuning)')
 parser.add_argument('--time_step', type=float, default=1.0)  # Simuleringens tidssteg
-parser.add_argument('--observer_time_step', type=float, default=1.0, help='Tidssteg for observer (hvis raskere enn simulering)')
+parser.add_argument('--observer_time_step', type=float, default=0.2, help='Tidssteg for observer (hvis raskere enn simulering)')
 parser.add_argument('--engine_step_count', type=int, default=10)
 parser.add_argument('--radius_of_acceptance', type=int, default=300)
 parser.add_argument('--lookahead_distance', type=int, default=1000)
@@ -38,7 +39,33 @@ parser.add_argument('--nav_fail_time', type=int, default=300)
 parser.add_argument('--ship_draw', type=bool, default=True)
 parser.add_argument('--time_since_last_ship_drawing', default=30)
 parser.add_argument('--warm_up_time', type=int, default=2500)
+parser.add_argument('--observer_noise_profile', type=str, default=DEFAULT_OBSERVER_NOISE_PROFILE,
+                    choices=['optimistic', 'realistic', 'conservative'])
+parser.add_argument('--tuning_profile', type=str, default='extreme_model_trusting',
+                    choices=['nominal', 'hard_model_trusting', 'extreme_model_trusting', 'hard_measurement_trusting', 'extreme_measurement_trusting'])
+parser.add_argument('--alpha_r_pos', type=float, default=None)
+parser.add_argument('--alpha_r_yaw', type=float, default=None)
+parser.add_argument('--alpha_r_speed', type=float, default=None)
+parser.add_argument('--alpha_q', type=float, default=None)
 args = parser.parse_args()
+
+
+TUNING_PROFILES = {
+    'nominal': (1.0, 1.0, 1.0, 1.0),
+    'hard_model_trusting': (10.0, 10.0, 10.0, 0.01),
+    'extreme_model_trusting': (10.0, 10.0, 10.0, 1e-4),
+    'hard_measurement_trusting': (0.05, 0.05, 0.05, 10.0),
+    'extreme_measurement_trusting': (0.005, 0.005, 0.005, 10.0),
+}
+
+
+def resolve_test_tuning(cli_args):
+    tuning = list(TUNING_PROFILES[cli_args.tuning_profile])
+    overrides = [cli_args.alpha_r_pos, cli_args.alpha_r_yaw, cli_args.alpha_r_speed, cli_args.alpha_q]
+    for idx, override in enumerate(overrides):
+        if override is not None:
+            tuning[idx] = float(override)
+    return tuple(tuning)
 
 
 # Map and route setup (match other run scripts)
@@ -165,10 +192,12 @@ machinery_config = MachinerySystemConfiguration(
 # Route and ship setup
 own_ship_route_filename = 'Stangvik_AST_reversed.txt'  # Samme som true_colav
 own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
-start_E, start_N = np.loadtxt(own_ship_route_name)[0]
+route_data = np.loadtxt(own_ship_route_name)
+start_E = route_data[0, 0]
+start_N = route_data[0, 1]
 own_ship_config = SimulationConfiguration(
-    initial_north_position_m=start_E,
-    initial_east_position_m=start_N,
+    initial_north_position_m=start_N,
+    initial_east_position_m=start_E,
     initial_yaw_angle_rad=np.deg2rad(-60.0),
     initial_forward_speed_m_per_s=0.0,
     initial_sideways_speed_m_per_s=0.0,
@@ -213,26 +242,24 @@ own_ship = ShipModel(
     print_status=True
 )
 
+if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
+    own_ship.auto_pilot.navigate.east = route_data[:, 0].tolist()
+    own_ship.auto_pilot.navigate.north = route_data[:, 1].tolist()
+
 # =====================
 #  SKRU OBSERVER AV/PÅ HER:
 # =====================
 USE_OBSERVER = True  
 
-# === Observer tuning scaling parameters ===
-Q_SCALE = 500.0  # Set to 1.0 for original, 100.0 for 100x, etc.
-R_SCALE = 500.0
-
-# Measurement noise standard deviation for observer (set to None or np.zeros(4) for no noise)
-MEAS_NOISE_STD = np.zeros(4)  # [north, east, yaw, speed] (set to zero for debugging)
-
-# === Observer tuning scaling parameters ===
-Q_SCALE = 500.0  # Set to 100.0 for 100x increased process noise
-R_SCALE = 500.0  # Set to 100.0 for 100x increased measurement noise
-
-# Tuning: Stol maksimalt på målingene, minimalt på modell
-Q_obs = None  # Bruk default eller tuningverdier
-# R_obs må matche [north, east, yaw, speed]
-R_obs = None
+# Single source of truth for observer tuning
+Q_SCALE = 1.0
+R_SCALE = 1.0
+observer_noise_cfg = get_observer_noise_config(args.observer_noise_profile)
+MEAS_NOISE_STD = observer_noise_cfg['measurement_noise_std']
+BIAS_NOISE_STD = observer_noise_cfg['bias_noise_std']
+BASE_Q = np.diag([0.01, 0.01, 1e-4, 0.05, 0.05, 0.01])
+Q_obs = BASE_Q * Q_SCALE
+R_obs = np.diag(MEAS_NOISE_STD**2) * R_SCALE
 
 # Bestem observerens tidssteg
 observer_dt = args.observer_time_step if args.observer_time_step is not None else own_ship.int.dt
@@ -245,9 +272,13 @@ own_ship.observer = ShipObserverEKF(
         own_ship.forward_speed,
         own_ship.sideways_speed,
         own_ship.yaw_rate
-    ], dtype=float)
-    # Q og R brukes for tuning, ikke for tilfeldig støy
+    ], dtype=float),
+    P0=np.eye(6)*1e-3,
+    Q=Q_obs,
+    R=R_obs
 )
+own_ship.observer.measurement_noise_std = MEAS_NOISE_STD
+own_ship.observer.bias_noise_std = BIAS_NOISE_STD
 own_ship.use_observer_for_control = USE_OBSERVER
 own_ship_info = AssetInfo(
     current_north       = own_ship.north,
@@ -266,7 +297,7 @@ own_ship_asset = ShipAsset(
 assets: List[ShipAsset] = [own_ship_asset]
 
 # Environment: observer, but no RL tuning (agent does not act)
-env = SeaEnvObserverAST(
+env = SeaEnvEstimatorTuningAST(
     assets=assets,
     map=map,
     wave_model_config=wave_model_config,
@@ -277,15 +308,46 @@ env = SeaEnvObserverAST(
     include_wind=True,
     include_current=True)
 
+# Widen the local test range so failure-seeking tunings are not clipped away.
+env.obs_tuning_range = {
+    'r_pos': np.array([1e-3, 1e3], dtype=np.float32),
+    'r_yaw': np.array([1e-3, 1e3], dtype=np.float32),
+    'r_speed': np.array([1e-3, 1e3], dtype=np.float32),
+    'q': np.array([1e-6, 1e3], dtype=np.float32),
+}
+
 own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
 
 obs, info = env.reset()
 step_idx = 0
 observer_steps_per_sim = int(np.round(args.time_step / observer_dt)) if observer_dt < args.time_step else 1
+
+TEST_TUNING = resolve_test_tuning(args)
+print(f'Using tuning profile {args.tuning_profile}: {TEST_TUNING}')
+nominal_action = np.array(env._normalize_action(TEST_TUNING), dtype=np.float32)
+
+# --- Logging for observer validation ---
+true_state_log = []  # [north, east, yaw, speed]
+est_state_log = []   # [north, east, yaw, speed]
+innovation_log = []  # [north, east, yaw, speed]
+
 while True:
-    action = [0.0, 0.0, 0.0]  # normalized action for nominal tuning
+    action = nominal_action
     # Ta et simuleringssteg (skip, miljø, etc)
     obs, reward, terminated, truncated, info = env.step(action)
+
+    # Log true and estimated states
+    true_state = np.array([
+        own_ship.north,
+        own_ship.east,
+        own_ship.yaw_angle,
+        np.hypot(own_ship.forward_speed, own_ship.sideways_speed)
+    ])
+    est_state = own_ship.observer.x[:4].copy() if hasattr(own_ship.observer, 'x') else np.zeros(4)
+    innovation = true_state - est_state
+    true_state_log.append(true_state)
+    est_state_log.append(est_state)
+    innovation_log.append(innovation)
 
     # Oppdater observeren flere ganger hvis ønsket
     if USE_OBSERVER and observer_steps_per_sim > 1:
@@ -296,8 +358,9 @@ while True:
                 own_ship.yaw_angle,
                 np.hypot(own_ship.forward_speed, own_ship.sideways_speed)
             ])
-            own_ship.observer.update(meas)
+            noisy_meas = own_ship.observer.apply_measurement_noise(meas)
             own_ship.observer.predict()
+            own_ship.observer.update(noisy_meas)
 
     step_idx += 1
     if terminated or truncated:
@@ -324,4 +387,67 @@ animate_side_by_side(map_anim.fig, polar_anim.fig,
                      show=False)
 plot_ship_status(own_ship_asset, own_ship_results_df, plot_env_load=True, show=False)
 plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=False)
+ # --- Plot all noise components (white, bias, total) for observer ---
+observer = env.assets[0].ship_model.observer
+if hasattr(observer, 'total_noise_log') and len(observer.total_noise_log) > 0:
+    total_noise = np.array(observer.total_noise_log)
+    white_noise = np.array(observer.white_noise_log)
+    bias_noise = np.array(observer.bias_log)
+    yaw_scale = 180.0 / np.pi
+    fig, axs = plt.subplots(3, 1, figsize=(12, 13), sharex=True)
+    # Position noise (north/east)
+    axs[0].plot(total_noise[:, 0], label="Total north", color="tab:blue", alpha=0.5)
+    axs[0].plot(white_noise[:, 0], label="White north", color="tab:cyan", linestyle="dashed", alpha=0.7)
+    axs[0].plot(total_noise[:, 1], label="Total east", color="tab:orange", alpha=0.5)
+    axs[0].plot(white_noise[:, 1], label="White east", color="tab:olive", linestyle="dashed", alpha=0.7)
+    # Plot bias (slowly varying) noise last, in front, thicker and red
+    axs[0].plot(bias_noise[:, 0], label="Bias north (slow)", color="red", linewidth=2.5, zorder=10)
+    axs[0].plot(bias_noise[:, 1], label="Bias east (slow)", color="darkred", linewidth=2.5, zorder=10)
+    axs[0].set_ylabel("Position noise [m]")
+    axs[0].set_title("Measurement noise components: position")
+    axs[0].legend()
+
+    # Heading noise in degrees for easier interpretation
+    axs[1].plot(total_noise[:, 2] * yaw_scale, label="Total heading", color="tab:purple", alpha=0.5)
+    axs[1].plot(white_noise[:, 2] * yaw_scale, label="White heading", color="plum", linestyle="dashed", alpha=0.7)
+    axs[1].plot(bias_noise[:, 2] * yaw_scale, label="Bias heading (slow)", color="red", linewidth=2.5, zorder=10)
+    axs[1].set_ylabel("Heading noise [deg]")
+    axs[1].set_title("Measurement noise components: heading")
+    axs[1].legend()
+
+    # Speed noise
+    axs[2].plot(total_noise[:, 3], label="Total speed", color="tab:green", alpha=0.5)
+    axs[2].plot(white_noise[:, 3], label="White speed", color="tab:olive", linestyle="dashed", alpha=0.7)
+    axs[2].plot(bias_noise[:, 3], label="Bias speed (slow)", color="red", linewidth=2.5, zorder=10)
+    axs[2].set_ylabel("Speed noise [m/s]")
+    axs[2].set_title("Measurement noise components: speed")
+    axs[2].legend()
+    axs[2].set_xlabel("Timestep")
+plt.show()
+
+# --- Plot observer validation: true vs. estimated and innovation ---
+true_state_log = np.array(true_state_log)
+est_state_log = np.array(est_state_log)
+innovation_log = np.array(innovation_log)
+labels = ["North [m]", "East [m]", "Yaw [rad]", "Speed [m/s]"]
+fig, axs = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+for i in range(4):
+    axs[i].plot(true_state_log[:, i], label="True", color="tab:blue", alpha=0.7)
+    axs[i].plot(est_state_log[:, i], label="Estimated", color="tab:orange", alpha=0.7)
+    axs[i].set_ylabel(labels[i])
+    axs[i].legend()
+axs[0].set_title("True vs. Estimated States (Observer Validation)")
+axs[-1].set_xlabel("Timestep")
+plt.tight_layout()
+plt.show()
+
+fig, axs = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+for i in range(4):
+    axs[i].plot(innovation_log[:, i], label="Innovation (meas - est)", color="tab:green", alpha=0.7)
+    axs[i].set_ylabel(labels[i])
+    axs[i].axhline(0, color="k", linestyle=":", linewidth=1)
+    axs[i].legend()
+axs[0].set_title("Innovation (Measurement - Estimate)")
+axs[-1].set_xlabel("Timestep")
+plt.tight_layout()
 plt.show()
