@@ -19,6 +19,30 @@ from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
 import argparse
 
 
+def ship_has_collision(ship):
+    collision_info = ship.stop_info.get('collision', False)
+    if isinstance(collision_info, (list, tuple)):
+        return bool(collision_info[0]) if len(collision_info) > 0 else False
+    return bool(collision_info)
+
+
+def print_separation_summary(info, collision=False, target_name=None):
+    distance = info.get('distance', info.get('encounter_range'))
+    if distance is None:
+        return
+
+    try:
+        distance_value = float(distance)
+    except (TypeError, ValueError):
+        return
+
+    label = 'Collision distance' if collision else 'Ship separation at stop'
+    if target_name:
+        print(f'{label} ({target_name}): {distance_value:.1f} m')
+    else:
+        print(f'{label}: {distance_value:.1f} m')
+
+
 parser = argparse.ArgumentParser(description='Two-ship estimator tuning simulation (nominal, no RL tuning)')
 parser.add_argument('--time_step', type=float, default=1.0)
 parser.add_argument('--observer_time_step', type=float, default=0.2)
@@ -124,6 +148,8 @@ while True:
 
     step_idx += 1
     if terminated or truncated:
+        collision = any(ship_has_collision(asset.ship_model) for asset in env.assets)
+        print_separation_summary(info, collision=collision)
         print(f'Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}')
         break
 

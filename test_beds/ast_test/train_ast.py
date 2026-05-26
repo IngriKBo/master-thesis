@@ -92,10 +92,10 @@ def parse_cli_args():
     # Add arguments for AST-core
     parser.add_argument('--n_episodes', type=int, default=1, metavar='N_EPISODES',
                         help='AST: number of simulation episode counts (default: 1)')
-    parser.add_argument('--warm_up_time', type=int, default=2500, metavar='WARM_UP_TIME',
-                        help='AST: time needed in second before policy - action sampling takes place (default: 1500)')
-    parser.add_argument('--action_sampling_period', type=int, default=900, metavar='ACT_SAMPLING_PERIOD',
-                        help='AST: time period in second between policy - action sampling (default: 900)')
+    parser.add_argument('--warm_up_time', type=int, default=240, metavar='WARM_UP_TIME',
+                        help='AST: time needed in second before policy action sampling takes place (default: 240)')
+    parser.add_argument('--action_sampling_period', type=int, default=120, metavar='ACT_SAMPLING_PERIOD',
+                        help='AST: time period in second between policy - action sampling (default: 120)')
     parser.add_argument('--total_steps', type=int, default=25000, metavar='TOTAL_STEPS',
                         help='AST: total training timesteps (default: 25000)')
     parser.add_argument('--strict_env_check', action='store_true',
@@ -104,10 +104,41 @@ def parse_cli_args():
                         help='AST: base name for this training run folder under trained_model (default: auto-generated from scenario and noise profile)')
     parser.add_argument('--observer_noise_profile', type=str, default='realistic', metavar='OBSERVER_NOISE_PROFILE',
                         help='Observer noise profile: optimistic, realistic or conservative (default: realistic)')
+    parser.add_argument('--estimator_tuning_bounds_profile', type=str, default='legacy',
+                        choices=['legacy', 'realistic'],
+                        help='Estimator-tuning action bounds profile: legacy [0.2, 5.0] or realistic [0.5, 2.0] (default: legacy)')
+    parser.add_argument('--measurement_noise_attack_mode', type=str, default=None,
+                        choices=['increase_only', 'symmetric_band'],
+                        help='Measurement-noise attack mode: default increase_only, or symmetric_band for experimental under/over scaling')
+    parser.add_argument('--allow_subnominal_noise', action='store_true',
+                        help='Legacy alias for measurement_noise_attack_mode=symmetric_band')
+    parser.add_argument('--measurement_noise_penalty_deadband', type=float, nargs=4,
+                        default=[0.05, 0.05, 0.05, 0.08], metavar=('POS', 'YAW', 'SPEED', 'BIAS'),
+                        help='Per-channel deadband around nominal measurement noise before penalties start (default: 0.05 0.05 0.05 0.08)')
+    parser.add_argument('--close_reward_distance', type=float, default=120.0,
+                        help='Optional immediate proximity reward decay distance in meters for measurement-noise scenarios (default: 120.0)')
+    parser.add_argument('--close_reward_gain', type=float, default=0.0,
+                        help='Optional immediate proximity reward gain for measurement-noise scenarios (default: 0.0)')
+    parser.add_argument('--collision_reward', type=float, default=120.0,
+                        help='Additional collision reward in two-ship measurement-noise scenarios (default: 120.0)')
+    parser.add_argument('--dcpa_reward_gain', type=float, default=20.0,
+                        help='Two-ship DCPA/TCPA encounter reward gain for measurement-noise scenarios (default: 20.0)')
+    parser.add_argument('--dcpa_reward_distance', type=float, default=120.0,
+                        help='Distance threshold in meters where low DCPA starts to be strongly rewarded (default: 120.0)')
+    parser.add_argument('--tcpa_reward_horizon', type=float, default=900.0,
+                        help='Maximum future TCPA horizon in seconds for encounter shaping (default: 900.0)')
+    parser.add_argument('--tcpa_window_center', type=float, default=240.0,
+                        help='Preferred TCPA window center in seconds for targeted attack timing (default: 240.0)')
+    parser.add_argument('--tcpa_window_width', type=float, default=180.0,
+                        help='Half-width of the preferred TCPA timing window in seconds (default: 180.0)')
+    parser.add_argument('--parallel_offset_m', type=float, default=300.0,
+                        help='Lateral offset applied to the passive ship route in two-ship scenarios while keeping reverse-direction pairing (default: 300.0)')
+    parser.add_argument('--fixed_training_route', action='store_true',
+                        help='Disable random route sampling during training and keep the factory default route setup')
 
     # Add argument for scenario
-    parser.add_argument('--scenario', type=str, default='observer', metavar='SCENARIO',
-                        help='Scenario to train on: observer, observer_two_ships, observer_noise or observer_noise_two_ships (default: observer)')
+    parser.add_argument('--scenario', type=str, default='observer_two_ships', metavar='SCENARIO',
+                        help='Scenario to train on: estimator_tuning, measurement_noise, estimator_tuning_two_ships, measurement_noise_two_ships, wave, or legacy aliases such as observer_noise_two_ships (default: observer_two_ships)')
 
     # Parse args
     args = parser.parse_args()
@@ -130,7 +161,18 @@ if __name__ == "__main__":
     # Get the assets and AST Environment Wrapper, scenario from args
     env, assets, map_gdfs = get_env_assets(args=args, scenario=args.scenario)
 
-    # Hard safety check så vi aldri trener feil scenario ved et uhell
+    # Make route sampling for training explicit instead of relying on env defaults.
+    if hasattr(env, 'set_random_route_flag'):
+        env.set_random_route_flag(not args.fixed_training_route)
+    if hasattr(env, 'set_for_training_flag'):
+        env.set_for_training_flag(True)
+
+    if getattr(env, 'random_route', False):
+        print('Training route mode : random training trajectories enabled')
+    else:
+        print('Training route mode : fixed default trajectory')
+
+    # Abort early if the selected environment does not match the intended AST scenarios.
     if type(env).__name__ not in ["SeaEnvEstimatorTuningAST", "SeaEnvMeasurementNoiseAST", "TwoShipsEstimatorTuningEnv", "TwoShipsMeasurementNoiseEnv"]:
         raise RuntimeError(
             f"Wrong environment selected: {type(env).__name__}. "
@@ -144,7 +186,7 @@ if __name__ == "__main__":
     print(f"Run log path       : {log_path}.txt")
     print(f"TensorBoard path   : {tb_path}")
 
-    # Check env sanity. Denne simulatoren er stokastisk, så deterministisk-sjekk kan feile.
+    # This simulator is stochastic, so deterministic environment checks may fail.
     try:
         check_env(env)
         print("Environment passes all checks!")
@@ -155,10 +197,10 @@ if __name__ == "__main__":
             sys.exit(1)  # non-zero exit code stopper scriptet
         print("Continuing training (strict env check disabled).")
 
-    # Logg config + faktisk env-klasse til fil
+    # Log the training configuration and resolved environment class.
     log_ast_training_config(args=args, txt_path=log_path, env=env, also_print=True)
 
-    # Sett RL-modell
+    # Configure the RL model.
     ast_model = SAC("MultiInputPolicy",
                     env=env,
                     learning_rate=3e-4,
@@ -187,12 +229,12 @@ if __name__ == "__main__":
                     seed=None,
                     device='cuda')
 
-    # Tren RL-modellen. Ta tiden
+    # Train the RL model and measure wall-clock time.
     start_time = time.time()
     progress_cb = PercentProgressCallback(total_timesteps=args.total_steps, print_every_pct=1)
-    # Legg til checkpoint callback for jevnlig lagring
+    # Save checkpoints regularly during training.
     checkpoint_callback = CheckpointCallback(
-        save_freq=1000,  # lagre hver 1000. steg
+        save_freq=1000,
         save_path=str(Path(model_path).parent),
         name_prefix=model_name + "_checkpoint"
     )
@@ -202,7 +244,7 @@ if __name__ == "__main__":
     hours, _         = divmod(minutes, 60)
     train_time = (hours, minutes, seconds)
 
-    # Lagre den trente modellen
+    # Save the trained model.
     ast_model.save(model_path)
 
 ################################## LOAD THE TRAINED MODEL ##################################

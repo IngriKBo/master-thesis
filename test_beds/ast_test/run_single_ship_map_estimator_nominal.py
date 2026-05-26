@@ -30,8 +30,8 @@ import argparse
 from typing import List
 
 parser = argparse.ArgumentParser(description='Ship in Transit Simulation (observer, no RL tuning)')
-parser.add_argument('--time_step', type=float, default=1.0)  # Simuleringens tidssteg
-parser.add_argument('--observer_time_step', type=float, default=0.2, help='Tidssteg for observer (hvis raskere enn simulering)')
+parser.add_argument('--time_step', type=float, default=1.0, help='Simulation time step')
+parser.add_argument('--observer_time_step', type=float, default=0.2, help='Observer time step when it runs faster than the simulator')
 parser.add_argument('--engine_step_count', type=int, default=10)
 parser.add_argument('--radius_of_acceptance', type=int, default=300)
 parser.add_argument('--lookahead_distance', type=int, default=1000)
@@ -190,7 +190,7 @@ machinery_config = MachinerySystemConfiguration(
 )
 
 # Route and ship setup
-own_ship_route_filename = 'Stangvik_AST_reversed.txt'  # Samme som true_colav
+own_ship_route_filename = 'Stangvik_AST_reversed.txt'  # Match the true_colav baseline.
 own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
 route_data = np.loadtxt(own_ship_route_name)
 start_E = route_data[0, 0]
@@ -247,7 +247,7 @@ if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
     own_ship.auto_pilot.navigate.north = route_data[:, 1].tolist()
 
 # =====================
-#  SKRU OBSERVER AV/PÅ HER:
+# Toggle observer usage here.
 # =====================
 USE_OBSERVER = True  
 
@@ -261,7 +261,7 @@ BASE_Q = np.diag([0.01, 0.01, 1e-4, 0.05, 0.05, 0.01])
 Q_obs = BASE_Q * Q_SCALE
 R_obs = np.diag(MEAS_NOISE_STD**2) * R_SCALE
 
-# Bestem observerens tidssteg
+# Resolve the observer time step.
 observer_dt = args.observer_time_step if args.observer_time_step is not None else own_ship.int.dt
 own_ship.observer = ShipObserverEKF(
     dt=observer_dt,
@@ -333,7 +333,7 @@ innovation_log = []  # [north, east, yaw, speed]
 
 while True:
     action = nominal_action
-    # Ta et simuleringssteg (skip, miljø, etc)
+    # Advance the simulator by one step.
     obs, reward, terminated, truncated, info = env.step(action)
 
     # Log true and estimated states
@@ -349,7 +349,7 @@ while True:
     est_state_log.append(est_state)
     innovation_log.append(innovation)
 
-    # Oppdater observeren flere ganger hvis ønsket
+    # Update the observer multiple times per simulator step if requested.
     if USE_OBSERVER and observer_steps_per_sim > 1:
         for _ in range(observer_steps_per_sim - 1):
             meas = np.array([

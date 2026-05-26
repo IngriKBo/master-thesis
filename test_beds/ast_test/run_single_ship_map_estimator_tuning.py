@@ -287,8 +287,8 @@ Q_obs = BASE_Q * Q_SCALE
 R_obs = np.diag(MEAS_NOISE_STD**2) * R_SCALE
 
 
-# Attach observer to own ship only
-# Q og R brukes for tuning, ikke for tilfeldig støy
+# Attach the observer to the own ship only.
+# Q and R are used for estimator tuning, not for random noise injection.
 observer_dt = args.observer_time_step if args.observer_time_step is not None else own_ship.int.dt
 own_ship.observer = ShipObserverEKF(
     dt=observer_dt,
@@ -306,7 +306,7 @@ own_ship.observer = ShipObserverEKF(
 )
 own_ship.observer.measurement_noise_std = MEAS_NOISE_STD
 own_ship.observer.bias_noise_std = BIAS_NOISE_STD
-own_ship.use_observer_for_control = True  # Nå bruker ColAV observerens (støyete) signaler
+own_ship.use_observer_for_control = True  # ColAV follows the observer-driven signals in this script.
 
 own_ship_info = AssetInfo(
     # dynamic state (mutable)
@@ -346,7 +346,7 @@ env = SeaEnvEstimatorTuningAST(
     include_current=True)
 
 
-# Posisjon er riktig her
+# Position handling is correct here.
 
 # Load trained model
 if args.model_path is not None:

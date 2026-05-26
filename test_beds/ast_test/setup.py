@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 ### IMPORT SIMULATOR ENVIRONMENTS
-from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset
+from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset, SeaEnvASTv2, choose_parallel_route
 from env_wrappers.sea_env_ast_v2.estimator_tuning_env import SeaEnvEstimatorTuningAST
 from env_wrappers.sea_env_ast_v2.measurement_noise_env import SeaEnvMeasurementNoiseAST
 from env_wrappers.sea_env_ast_v2.two_ships_measurement_noise_env import TwoShipsMeasurementNoiseEnv
@@ -71,12 +71,21 @@ def get_observer_noise_config(profile_name=DEFAULT_OBSERVER_NOISE_PROFILE):
 # Add new scenarios here as key-value pairs
 # ============================================
 ENVIRONMENT_SCENARIOS = {
+    'nominal_two_ships': SeaEnvASTv2,
     'estimator_tuning': SeaEnvEstimatorTuningAST,
     'measurement_noise': SeaEnvMeasurementNoiseAST,
     'measurement_noise_two_ships': TwoShipsMeasurementNoiseEnv,
     'estimator_tuning_two_ships': TwoShipsEstimatorTuningEnv,
     'wave': SeaEnvAST,
     # Add more scenarios here: 'scenario_name': EnvironmentClass
+}
+
+SCENARIO_ALIASES = {
+    'observer': 'estimator_tuning',
+    'observer_noise': 'measurement_noise',
+    'passive_two_ships': 'nominal_two_ships',
+    'observer_two_ships': 'estimator_tuning_two_ships',
+    'observer_noise_two_ships': 'measurement_noise_two_ships',
 }
 
 def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
@@ -92,6 +101,8 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         env, assets, map_gdfs
     """
     
+    scenario = SCENARIO_ALIASES.get(scenario, scenario)
+
     # Validate scenario
     if scenario not in ENVIRONMENT_SCENARIOS:
         raise ValueError(f"Unknown scenario '{scenario}'. Available: {list(ENVIRONMENT_SCENARIOS.keys())}")
@@ -250,17 +261,25 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001
     )
 
-    own_ship_heading_controller_gains = HeadingControllerGains(kp=1.5, kd=0, ki=0.00)
+    passive_nominal_heading_controller_gains = HeadingControllerGains(kp=1.5, kd=75, ki=0.005)
+    conservative_observer_ship = scenario == 'measurement_noise_two_ships'
+    own_ship_heading_controller_gains = (
+        passive_nominal_heading_controller_gains
+        if scenario == 'nominal_two_ships' or conservative_observer_ship
+        else HeadingControllerGains(kp=1.5, kd=0, ki=0.00)
+    )
     own_ship_los_guidance_parameters = LosParameters(
         radius_of_acceptance=args.radius_of_acceptance,
         lookahead_distance=args.lookahead_distance,
         integral_gain=0.002,
         integrator_windup_limit=4000
     )
-    own_ship_desired_speed = 4.5
+    own_ship_desired_speed = 4.0 if scenario == 'nominal_two_ships' or conservative_observer_ship else 4.5
     own_ship_cross_track_error_tolerance = 750
     own_ship_initial_propeller_shaft_speed = 0
     own_ship_initial_propeller_shaft_acceleration = 0
+    own_ship_name = 'Passive Ship 1' if scenario == 'nominal_two_ships' else 'Observer Ship'
+
     own_ship = ShipModel(
         ship_config=ship_config,
         simulation_config=own_ship_config,
@@ -271,7 +290,7 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         throttle_controller_gain=own_ship_throttle_controller_gains,
         heading_controller_gain=own_ship_heading_controller_gains,
         los_parameters=own_ship_los_guidance_parameters,
-        name_tag='Observer Ship',
+        name_tag=own_ship_name,
         route_name=own_ship_route_name,
         engine_steps_per_time_step=args.engine_step_count,
         initial_propeller_shaft_speed_rad_per_s=own_ship_initial_propeller_shaft_speed * np.pi /30,
@@ -336,24 +355,31 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
 
     # Package the assets for reinforcement learning agent
 
-    if scenario in ['observer_two_ships', 'observer_noise_two_ships']:
-        # Ship 2 follows the same route in the opposite direction without observer/noise manipulation,
-        # but still uses its nominal collision-avoidance controller.
+    if scenario in ['nominal_two_ships', 'measurement_noise_two_ships', 'estimator_tuning_two_ships']:
         route2_filename = 'Stangvik_AST.txt'
         route2_path = get_ship_route_path(ROOT, route2_filename)
         route2_data = np.loadtxt(route2_path)
+        parallel_offset_m = float(getattr(args, 'parallel_offset_m', 0.0))
+        if parallel_offset_m != 0.0:
+            route2_data = choose_parallel_route(route2_data, map_obj=map[0], lateral_offset_m=parallel_offset_m)
+            if route2_data is None:
+                raise ValueError(
+                    f"Fixed {scenario} route cannot support a parallel offset of {parallel_offset_m} m without entering land."
+                )
         start_E2 = route2_data[0, 0]
         start_N2 = route2_data[0, 1]
         ship2_config = SimulationConfiguration(
             initial_north_position_m=start_N2,
             initial_east_position_m=start_E2,
-            initial_yaw_angle_rad=np.deg2rad(120.0),  # motsatt retning
+            initial_yaw_angle_rad=np.deg2rad(120.0),
             initial_forward_speed_m_per_s=0.0,
             initial_sideways_speed_m_per_s=0.0,
             initial_yaw_rate_rad_per_s=0.0,
             integration_step=args.time_step,
             simulation_time=20000,
         )
+        ship2_name = 'Passive Ship 2' if scenario == 'nominal_two_ships' else 'Passive Ship'
+
         ship2 = ShipModel(
             ship_config=ship_config,
             simulation_config=ship2_config,
@@ -362,14 +388,14 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
             wind_model_config=wind_model_config,
             machinery_config=machinery_config,
             throttle_controller_gain=ThrottleControllerGains(kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001),
-            heading_controller_gain=HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
+            heading_controller_gain=passive_nominal_heading_controller_gains if scenario == 'nominal_two_ships' else HeadingControllerGains(kp=1.5, kd=75, ki=0.005),
             los_parameters=LosParameters(radius_of_acceptance=args.radius_of_acceptance, lookahead_distance=args.lookahead_distance, integral_gain=0.002, integrator_windup_limit=4000),
-            name_tag='Passive Ship',
-            route_name=route2_path,
+            name_tag=ship2_name,
+            route_name=route2_data if parallel_offset_m != 0.0 else route2_path,
             engine_steps_per_time_step=args.engine_step_count,
             initial_propeller_shaft_speed_rad_per_s=0,
             initial_propeller_shaft_acc_rad_per_sec2=0,
-            desired_speed=4.0,
+            desired_speed=own_ship_desired_speed if scenario == 'nominal_two_ships' else 4.0,
             cross_track_error_tolerance=750,
             nav_fail_time=args.nav_fail_time,
             map_obj=map[0],
@@ -391,6 +417,7 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         )
         ship2_asset = ShipAsset(ship_model=ship2, info=ship2_info)
         assets: List[ShipAsset] = [own_ship_asset, ship2_asset]
+        include_env_disturbance = not bool(getattr(args, 'zero_disturbance', False))
         env = env_class(
             assets=assets,
             map=map,
@@ -398,10 +425,11 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
             current_model_config=current_model_config,
             wind_model_config=wind_model_config,
             args=args,
-            include_wave=True,
-            include_wind=True,
-            include_current=True)
+            include_wave=include_env_disturbance,
+            include_wind=include_env_disturbance,
+            include_current=include_env_disturbance)
     else:
+        include_env_disturbance = not bool(getattr(args, 'zero_disturbance', False))
         assets: List[ShipAsset] = [own_ship_asset]
         env = env_class(
             assets=assets,
@@ -410,7 +438,7 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
             current_model_config=current_model_config,
             wind_model_config=wind_model_config,
             args=args,
-            include_wave=True,
-            include_wind=True,
-            include_current=True)
+            include_wave=include_env_disturbance,
+            include_wind=include_env_disturbance,
+            include_current=include_env_disturbance)
     return env, assets, map_gdfs

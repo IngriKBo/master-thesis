@@ -19,6 +19,36 @@ from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
 import argparse
 
 
+def resolve_model_path(cli_model_path, model_prefix):
+    if cli_model_path is not None:
+        return str(Path(cli_model_path))
+
+    trained_model_root = ROOT / 'trained_model'
+    candidates = sorted(trained_model_root.glob(f'{model_prefix}*/model.zip'))
+    if not candidates:
+        raise FileNotFoundError(
+            f'No trained model found for prefix {model_prefix}. Provide --model_path explicitly.'
+        )
+    return str(candidates[-1])
+
+
+def print_separation_summary(info, collision=False, target_name=None):
+    distance = info.get('distance', info.get('encounter_range'))
+    if distance is None:
+        return
+
+    try:
+        distance_value = float(distance)
+    except (TypeError, ValueError):
+        return
+
+    label = 'Collision distance' if collision else 'Ship separation at stop'
+    if target_name:
+        print(f'{label} ({target_name}): {distance_value:.1f} m')
+    else:
+        print(f'{label}: {distance_value:.1f} m')
+
+
 parser = argparse.ArgumentParser(description='Two-ship measurement-noise stress test (trained agent)')
 parser.add_argument('--time_step', type=int, default=5)
 parser.add_argument('--engine_step_count', type=int, default=10)
@@ -28,24 +58,40 @@ parser.add_argument('--nav_fail_time', type=int, default=300)
 parser.add_argument('--ship_draw', type=bool, default=True)
 parser.add_argument('--time_since_last_ship_drawing', type=int, default=30)
 parser.add_argument('--map_gpkg_filename', type=str, default='Stangvik.gpkg')
-parser.add_argument('--warm_up_time', type=int, default=2500)
-parser.add_argument('--action_sampling_period', type=int, default=900)
+parser.add_argument('--warm_up_time', type=int, default=240)
+parser.add_argument('--action_sampling_period', type=int, default=120)
+parser.add_argument('--model_path', type=str, default=None)
+parser.add_argument('--fixed_route', action='store_true',
+                    help='Use the static setup route instead of sampling a new opposite route pair each run')
+parser.add_argument('--parallel_offset_m', type=float, default=300.0,
+                    help='Lateral offset applied to the passive ship route while keeping reverse-direction pairing')
 parser.add_argument('--observer_noise_profile', type=str, default=DEFAULT_OBSERVER_NOISE_PROFILE,
                     choices=['optimistic', 'realistic', 'conservative'])
+parser.add_argument('--measurement_noise_attack_mode', type=str, default=None,
+                    choices=['increase_only', 'symmetric_band'])
+parser.add_argument('--allow_subnominal_noise', action='store_true',
+                    help='Legacy alias for measurement_noise_attack_mode=symmetric_band')
+parser.add_argument('--measurement_noise_penalty_deadband', type=float, nargs=4,
+                    default=[0.05, 0.05, 0.05, 0.08])
+parser.add_argument('--close_reward_distance', type=float, default=120.0)
+parser.add_argument('--close_reward_gain', type=float, default=0.0)
+parser.add_argument('--collision_reward', type=float, default=120.0)
+parser.add_argument('--dcpa_reward_gain', type=float, default=30.0)
+parser.add_argument('--dcpa_reward_distance', type=float, default=120.0)
+parser.add_argument('--tcpa_reward_horizon', type=float, default=900.0)
+parser.add_argument('--tcpa_window_center', type=float, default=240.0)
+parser.add_argument('--tcpa_window_width', type=float, default=180.0)
+parser.add_argument('--stochastic_policy', action='store_true',
+                    help='Sample actions from the SAC policy instead of using the deterministic mean action during evaluation')
 args = parser.parse_args()
 
 
 env, assets, map_gdfs = get_env_assets(args=args, scenario='measurement_noise_two_ships')
 
-env.set_random_route_flag(False)
-env.set_for_training_flag(False)
+env.set_random_route_flag(not args.fixed_route)
+env.set_for_training_flag(not args.fixed_route)
 
-model_load_path = str(
-    ROOT
-    / 'trained_model'
-    / 'AST-observer-noise-two-ships-train-realistic_2026-04-21_13-57-11_d8e5'
-    / 'model.zip'
-)
+model_load_path = resolve_model_path(args.model_path, 'AST-observer-noise-two-ships-train')
 print(f'Loading model from: {model_load_path}')
 
 model = SAC.load(model_load_path)
@@ -57,7 +103,7 @@ initial_noise = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
 obs, info = env.reset()
 step_idx = 0
 while True:
-    action, _states = model.predict(obs, deterministic=True)
+    action, _states = model.predict(obs, deterministic=not args.stochastic_policy)
     action = np.asarray(action, dtype=np.float32).reshape(-1)
     obs, reward, terminated, truncated, info = env.step(action)
 
@@ -72,6 +118,7 @@ while True:
 
     step_idx += 1
     if terminated or truncated:
+        print_separation_summary(info, collision=bool(info.get('collision', False)))
         print(f'Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}')
         break
 

@@ -42,10 +42,18 @@ parser.add_argument('--ship_draw', type=bool, default=True)
 parser.add_argument('--time_since_last_ship_drawing', type=int, default=30)
 parser.add_argument('--map_gpkg_filename', type=str, default='Stangvik.gpkg')
 parser.add_argument('--warm_up_time', type=int, default=2500)
-parser.add_argument('--action_sampling_period', type=int, default=900)
+parser.add_argument('--action_sampling_period', type=int, default=120)
 parser.add_argument('--model_path', type=str, default=None)
 parser.add_argument('--observer_noise_profile', type=str, default=DEFAULT_OBSERVER_NOISE_PROFILE,
                     choices=['optimistic', 'realistic', 'conservative'])
+parser.add_argument('--measurement_noise_attack_mode', type=str, default=None,
+                    choices=['increase_only', 'symmetric_band'])
+parser.add_argument('--allow_subnominal_noise', action='store_true',
+                    help='Legacy alias for measurement_noise_attack_mode=symmetric_band')
+parser.add_argument('--measurement_noise_penalty_deadband', type=float, nargs=4,
+                    default=[0.05, 0.05, 0.05, 0.08])
+parser.add_argument('--stochastic_policy', action='store_true',
+                    help='Sample actions from the SAC policy instead of using the deterministic mean action during evaluation')
 args = parser.parse_args()
 
 
@@ -66,7 +74,7 @@ initial_noise = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
 obs, info = env.reset()
 step_idx = 0
 while True:
-    action, _states = model.predict(obs, deterministic=True)
+    action, _states = model.predict(obs, deterministic=not args.stochastic_policy)
     action = np.asarray(action, dtype=np.float32).reshape(-1)
     obs, reward, terminated, truncated, info = env.step(action)
 

@@ -54,7 +54,7 @@ parser.add_argument('--observer_noise_profile', type=str, default=DEFAULT_OBSERV
 
 args = parser.parse_args()
 
-# Kart og rute
+# Map and route setup
 GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")
 FRAME_LAYER = "frame_3857"
 OCEAN_LAYER = "ocean_3857"
@@ -67,7 +67,7 @@ map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
 map_data = get_polygon_from_gdf(land_gdf)
 map = [PolygonObstacle(map_data), frame_gdf]
 
-# Skip og maskinkonfig
+# Ship and machinery configuration
 main_engine_capacity = 2160e3
 diesel_gen_capacity = 510e3
 hybrid_shaft_gen_as_generator = 'GEN'
@@ -176,7 +176,7 @@ machinery_config = MachinerySystemConfiguration(
     specific_fuel_consumption_coefficients_dg=fuel_spec_dg.fuel_consumption_coefficients()
 )
 
-# Rute
+# Route setup
 own_ship_route_filename = 'Stangvik_AST.txt'
 own_ship_route_name = get_ship_route_path(ROOT, own_ship_route_filename)
 mission_traj = np.loadtxt(own_ship_route_name)
@@ -235,7 +235,7 @@ if hasattr(own_ship, 'auto_pilot') and hasattr(own_ship.auto_pilot, 'navigate'):
     own_ship.auto_pilot.navigate.east = mission_traj[:, 0].tolist()
     own_ship.auto_pilot.navigate.north = mission_traj[:, 1].tolist()
 
-# Observer: initial tuning, will be changed by agent
+# Observer: start from nominal tuning and let the agent adjust it.
 observer_noise_cfg = get_observer_noise_config(args.observer_noise_profile)
 own_ship.observer = ShipObserverEKF(
     dt=own_ship.int.dt,
@@ -280,7 +280,7 @@ env = SeaEnvEstimatorTuningAST(
     include_wind=True,
     include_current=True)
 
-# Last inn agent som tuner observeren
+# Load the trained agent that tunes the observer.
 if args.model_path is not None:
     model_load_path = str(Path(args.model_path))
 else:
@@ -297,7 +297,7 @@ step_idx = 0
 while True:
     action, _states = model.predict(obs, deterministic=True)
     obs, reward, terminated, truncated, info = env.step(action)
-    # Logg observer-tuning
+    # Record the observer tuning selected at this step.
     if hasattr(env, 'action_list') and len(env.action_list) > 0:
         tuning = list(env.action_list[-1])
         observer_tuning_history.append(tuning)
@@ -314,7 +314,7 @@ while True:
         print(f"[DEBUG] Simulation stopped. terminated={terminated}, truncated={truncated}, info={info}")
         break
 
-# --- Plotting (samme som run_single_ship_map_observer) ---
+# --- Plotting ---
 own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
 result_dfs = [own_ship_results_df]
 

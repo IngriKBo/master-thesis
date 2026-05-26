@@ -221,12 +221,12 @@ own_ship.observer = ShipObserverEKF(
         own_ship.sideways_speed,
         own_ship.yaw_rate
     ], dtype=float)
-    # Q og R brukes for tuning, ikke for tilfeldig støy
+    # Q and R are omitted here because this baseline does not tune the observer.
 )
 own_ship.use_observer_for_control = True
 
-# --- Patch: Use true signals for colav (not observer) ---
-# This disables observer-based navigation for COLAV (guidance/control)
+# --- Use true signals for COLAV instead of observer signals. ---
+# This disables observer-based navigation for the guidance and control stack.
 own_ship.use_observer_for_control = False
 
 own_ship_info = AssetInfo(
