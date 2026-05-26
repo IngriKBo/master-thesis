@@ -1,6 +1,12 @@
 # MAR-AST
 Repository for Adaptive Stress Testing (AST) algorithm for maritime operations.
 
+This README documents the simulator and MAR-AST code contained in `simulator/tmp-mar-ast`.
+
+For the thesis-facing repository overview, thesis contributions, and attribution statement, see the root README in `../../README.md`.
+
+If you are reading this repository as part of the thesis, use the root README first and this document second.
+
 ## Conda Environment Setup [Simulator Only]
 
 First clone the repository. Made sure conda is installed. Then, set up the conda environment by running this command in terminal:

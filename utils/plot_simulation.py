@@ -381,7 +381,16 @@ def plot_ship_and_real_map(
     ax.set_aspect("equal", adjustable="box")
 
     # --- ship trajectories ---------------------------------------------------
-    ship_colors = ["#0c3c78", "#f08c00", "#2b8a3e", "#9c36b5"]
+    ship_colors = [
+        "#0c3c78",
+        "#f08c00",
+        "#2b8a3e",
+        "#9c36b5",
+        "#0b7285",
+        "#6b4f2a",
+        "#c2255c",
+        "#495057",
+    ]
     route_color = "#d90808"   # orange for mission trajectory / waypoints
 
     ship_handles = []
@@ -391,8 +400,14 @@ def plot_ship_and_real_map(
 
     for i, asset in enumerate(assets):
         ship_color = ship_colors[i % len(ship_colors)]
-        ship_zorder = 12 if i == 0 else 10 - i
-        outline_zorder = 11 if i == 0 else 7 - i
+        if i == 0:
+            ship_zorder = 30
+            outline_zorder = 26
+            ship_line_width = 2.2
+        else:
+            ship_zorder = 12 + i
+            outline_zorder = 8 + i
+            ship_line_width = 1.8
         # actual sailed track
         east_vals = result_dfs[i]["east position [m]"].to_numpy()
         north_vals = result_dfs[i]["north position [m]"].to_numpy()
@@ -401,8 +416,8 @@ def plot_ship_and_real_map(
             north_vals,  # x-axis: north
             east_vals,   # y-axis: east
             color=ship_color,
-            lw=1.6,  # thinner line
-            alpha=1.0,
+            lw=ship_line_width,
+            alpha=0.95,
             zorder=ship_zorder,
             label=asset.info.name_tag,
         )
@@ -414,20 +429,20 @@ def plot_ship_and_real_map(
                 asset.ship_model.auto_pilot.navigate.north,  # x-axis: north
                 asset.ship_model.auto_pilot.navigate.east,   # y-axis: east
                 linestyle="--",
-                lw=1.8,
-                alpha=0.95,
+                lw=1.4,
+                alpha=0.72,
                 color=route_color,
-                zorder=5,
+                zorder=4,
                 label="Mission trajectory" if route_handle is None else "_nolegend_",
             )
             ax.scatter(
                 asset.ship_model.auto_pilot.navigate.north,
                 asset.ship_model.auto_pilot.navigate.east,
                 marker="x",
-                s=30,
-                linewidths=1.6,
+                s=22,
+                linewidths=1.2,
                 color=route_color,
-                zorder=6,
+                zorder=5,
             )
             if route_handle is None:
                 route_handle = route_line
@@ -435,6 +450,21 @@ def plot_ship_and_real_map(
         # ship outlines along the path
         for x, y in zip(asset.ship_model.ship_drawings[1], asset.ship_model.ship_drawings[0]):
             ax.plot(x, y, color=ship_color, lw=1.0, zorder=outline_zorder)
+
+        collision_info = asset.ship_model.stop_info.get('collision', False)
+        ship_collision = bool(collision_info[0]) if isinstance(collision_info, (list, tuple)) else bool(collision_info)
+        if i == 0 and ship_collision and len(north_vals) > 0 and len(east_vals) > 0:
+            ax.scatter(
+                north_vals[-1],
+                east_vals[-1],
+                marker='X',
+                s=90,
+                facecolor='#d90808',
+                edgecolor='white',
+                linewidths=1.2,
+                zorder=ship_zorder + 2,
+                label='_nolegend_',
+            )
 
     # --- axes, labels, legend -----------------------------------------------
     ax.set_axis_on()

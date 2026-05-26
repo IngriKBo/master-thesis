@@ -4,8 +4,7 @@ This module provides classes for AST-compliant environment wrapper
 from pathlib import Path
 import sys
 
-## PATH HELPER (OBLIGATORY)
-# project root = two levels up from this file
+# Add the project root to sys.path.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -30,6 +29,109 @@ from utils.get_path import get_ship_route_path_for_training, get_ship_route_path
 import json
 
 import copy
+
+
+def collision_flag(collision_info):
+    if isinstance(collision_info, (list, tuple)) and len(collision_info) > 0:
+        return bool(collision_info[0])
+    return bool(collision_info)
+
+
+def offset_route_parallel(route_data, lateral_offset_m=0.0):
+    route_arr = np.asarray(route_data, dtype=float)
+    if lateral_offset_m == 0.0 or route_arr.ndim != 2 or route_arr.shape[0] < 2:
+        return route_arr.copy()
+
+    tangents = np.gradient(route_arr, axis=0)
+    tangent_norm = np.linalg.norm(tangents, axis=1, keepdims=True)
+    tangent_norm = np.maximum(tangent_norm, 1e-6)
+    unit_tangents = tangents / tangent_norm
+
+    # Route coordinates are stored as [east, north].
+    unit_normals = np.column_stack((-unit_tangents[:, 1], unit_tangents[:, 0]))
+    return route_arr + float(lateral_offset_m) * unit_normals
+
+
+def choose_parallel_route(route_data, map_obj=None, lateral_offset_m=0.0):
+    route_arr = np.asarray(route_data, dtype=float)
+    if lateral_offset_m == 0.0 or route_arr.ndim != 2 or route_arr.shape[0] < 2:
+        return route_arr.copy()
+
+    candidates = [
+        offset_route_parallel(route_arr, lateral_offset_m=lateral_offset_m),
+        offset_route_parallel(route_arr, lateral_offset_m=-lateral_offset_m),
+    ]
+
+    if map_obj is None:
+        return candidates[0]
+
+    valid_candidates = []
+    for candidate in candidates:
+        if map_obj.if_route_inside_obstacles(n_route=candidate[:, 1], e_route=candidate[:, 0]):
+            continue
+        min_clearance = min(
+            float(map_obj.obstacles_distance(n_ship=float(point[1]), e_ship=float(point[0])))
+            for point in candidate
+        )
+        valid_candidates.append((min_clearance, candidate))
+
+    if not valid_candidates:
+        return None
+
+    valid_candidates.sort(key=lambda item: item[0], reverse=True)
+    return valid_candidates[0][1]
+
+
+def paired_reset_routes(route, lateral_offset_m=0.0, map_obj=None):
+    if route is None:
+        return None
+
+    route_data = np.loadtxt(route) if isinstance(route, str) else np.asarray(route, dtype=float)
+    if route_data.ndim != 2 or route_data.shape[0] < 2:
+        return route_data
+
+    passive_route = choose_parallel_route(route_data, map_obj=map_obj, lateral_offset_m=lateral_offset_m)
+    if passive_route is None:
+        return None
+    return [route_data, passive_route[::-1].copy()]
+
+
+def wrap_to_pi(angle):
+    return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def ship_velocity_ne(ship):
+    body_velocity = np.array([ship.forward_speed, ship.sideways_speed], dtype=float)
+    rotation_inv = np.array(
+        [
+            [np.cos(ship.yaw_angle), np.sin(ship.yaw_angle)],
+            [-np.sin(ship.yaw_angle), np.cos(ship.yaw_angle)],
+        ],
+        dtype=float,
+    )
+    return rotation_inv @ body_velocity
+
+
+def encounter_metrics(own_ship, target_ship):
+    relative_position = np.array(
+        [target_ship.north - own_ship.north, target_ship.east - own_ship.east],
+        dtype=float,
+    )
+    range_m = float(np.linalg.norm(relative_position))
+    line_of_sight = float(np.arctan2(relative_position[1], relative_position[0]))
+    relative_bearing = wrap_to_pi(line_of_sight - own_ship.yaw_angle)
+
+    relative_velocity = ship_velocity_ne(target_ship) - ship_velocity_ne(own_ship)
+    relative_speed_sq = float(np.dot(relative_velocity, relative_velocity))
+    if relative_speed_sq <= 1e-8:
+        tcpa = 0.0
+        dcpa = range_m
+    else:
+        tcpa = -float(np.dot(relative_position, relative_velocity)) / relative_speed_sq
+        closest_approach = relative_position + tcpa * relative_velocity
+        dcpa = float(np.linalg.norm(closest_approach))
+
+    return np.array([range_m, relative_bearing, dcpa, tcpa], dtype=np.float32)
 
 @dataclass
 class AssetInfo:
@@ -161,11 +263,11 @@ class SeaEnvASTv2(gym.Env):
         self.psi_c_bar_wu = np.deg2rad(0.0)
         
         ## Observation space
-        minx, miny, maxx, maxy           = self.map_frame.total_bounds
+        east_min_bound, north_min_bound, east_max_bound, north_max_bound = self.map_frame.total_bounds
         # North ship position
-        north_min, north_max             = np.array([miny, maxy], dtype=np.float32)
+        north_min, north_max             = np.array([north_min_bound, north_max_bound], dtype=np.float32)
         # East ship position
-        east_min, east_max               = np.array([minx, maxx], dtype=np.float32)
+        east_min, east_max               = np.array([east_min_bound, east_max_bound], dtype=np.float32)
         # Ship heading (in NED)
         heading_min, heading_max         = np.array([-np.pi, np.pi], dtype=np.float32)
         # Ship speed
@@ -180,6 +282,9 @@ class SeaEnvASTv2(gym.Env):
         U_c_min, U_c_max                 = np.array([0.0, 5.0], dtype=np.float32)
         # Current direction
         psi_c_min, psi_c_max             = np.array([-np.pi, np.pi], dtype=np.float32)
+        # Two-ship encounter quantities
+        map_diagonal                     = float(np.hypot(north_max_bound - north_min_bound, east_max_bound - east_min_bound))
+        tcpa_abs_max                     = max(300.0, 2.0 * map_diagonal / max(1.0, 2.0 * float(speed_max)))
         
         # Range for normalization
         self.position_range          = {"min": np.array([north_min, east_min, heading_min], dtype=np.float32), "max": np.array([north_max, east_max, heading_max], dtype=np.float32)}
@@ -187,6 +292,11 @@ class SeaEnvASTv2(gym.Env):
         self.cross_track_error_range = {"min": np.array([e_ct_min], dtype=np.float32), "max": np.array([e_ct_max], dtype=np.float32)}
         self.wind_range              = {"min": np.array([U_w_min, psi_ww_min], dtype=np.float32), "max": np.array([U_w_max, psi_ww_max], dtype=np.float32)}
         self.current_range           = {"min": np.array([U_c_min, psi_c_min], dtype=np.float32), "max": np.array([U_c_max, psi_c_max], dtype=np.float32)}
+        self.include_encounter_observation = len(self.assets) > 1
+        self.encounter_range         = {
+            "min": np.array([0.0, -np.pi, 0.0, -tcpa_abs_max], dtype=np.float32),
+            "max": np.array([map_diagonal, np.pi, map_diagonal, tcpa_abs_max], dtype=np.float32),
+        }
         
         # Initialize action space
         self.init_action_space()
@@ -261,15 +371,16 @@ class SeaEnvASTv2(gym.Env):
         ) # In order -> [Hs, U_w_bar, Tp, psi_ww_bar, U_c_bar, psi_c_bar]
         
     def init_observation_space(self):
-        self.observation_space = gym.spaces.Dict(
-            {
-                "position"          : Box(-1.0, 1.0, shape=(3,), dtype=np.float32),
-                "speed"             : Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-                "cross_track_error" : Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
-                "wind"              : Box(-1.0, 1.0, shape=(2,), dtype=np.float32),
-                "current"           : Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
-            }
-        )
+        observation_dict = {
+            "position"          : Box(-1.0, 1.0, shape=(3,), dtype=np.float32),
+            "speed"             : Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "cross_track_error" : Box(-1.0, 1.0, shape=(1,), dtype=np.float32),
+            "wind"              : Box(-1.0, 1.0, shape=(2,), dtype=np.float32),
+            "current"           : Box(-1.0, 1.0, shape=(2,), dtype=np.float32),
+        }
+        if self.include_encounter_observation:
+            observation_dict["encounter"] = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
+        self.observation_space = gym.spaces.Dict(observation_dict)
     
     def _safe_clip(self, x, low=-1.0, high=1.0):
         # Prevent observation to go out of declared space's bound
@@ -283,9 +394,8 @@ class SeaEnvASTv2(gym.Env):
         Automatically normalized the observation.
         """   
         # Get raw values
-        # ADDED/CHANGED: use observer estimates for own-ship if available
         ship = self.assets[0].ship_model
-        if ship.observer is not None:
+        if ship.observer is not None and ship.use_observer_for_control:
             position = np.array([ship.estimated_north, ship.estimated_east, ship.yaw_angle], dtype=np.float32)
             speed = np.array([ship.estimated_speed], dtype=np.float32)
         else:
@@ -296,12 +406,18 @@ class SeaEnvASTv2(gym.Env):
                                             self.assets[0].ship_model.simulation_results['wind dir [deg]'][-1]], dtype=np.float32)
         current                 = np.array([self.assets[0].ship_model.simulation_results['current speed [m/s]'][-1], 
                                             self.assets[0].ship_model.simulation_results['current dir [deg]'][-1]], dtype=np.float32)
+        encounter               = None
+        if self.include_encounter_observation:
+            encounter = encounter_metrics(self.assets[0].ship_model, self.assets[1].ship_model)
         
         position_norm           = self._normalize(position, self.position_range["min"], self.position_range["max"])
         speed_norm              = self._normalize(speed, self.speed_range["min"], self.speed_range["max"])
         cross_track_error_norm  = self._normalize(cross_track_error, self.cross_track_error_range["min"], self.cross_track_error_range["max"])
         wind_norm               = self._normalize(wind, self.wind_range["min"], self.wind_range["max"])
         current_norm            = self._normalize(current, self.current_range["min"], self.current_range["max"])
+        encounter_norm          = None
+        if encounter is not None:
+            encounter_norm = self._normalize(encounter, self.encounter_range["min"], self.encounter_range["max"])
 
         if normalized: 
             # CLip the normalized observation within bound
@@ -312,6 +428,8 @@ class SeaEnvASTv2(gym.Env):
                 "wind"              : self._safe_clip(wind_norm),
                 "current"           : self._safe_clip(current_norm)
             }
+            if encounter_norm is not None:
+                observation["encounter"] = self._safe_clip(encounter_norm)
         else:
             observation         = {
                 "position"          : position.astype(np.float32),
@@ -320,6 +438,8 @@ class SeaEnvASTv2(gym.Env):
                 "wind"              : wind.astype(np.float32),
                 "current"           : current.astype(np.float32)
             }
+            if encounter is not None:
+                observation["encounter"] = encounter.astype(np.float32)
         
         return observation
     
@@ -329,9 +449,15 @@ class SeaEnvASTv2(gym.Env):
         Returns:
             dict: Info with distance between agent and target
         """
-        return {
-
-        }
+        if self.include_encounter_observation:
+            encounter = encounter_metrics(self.assets[0].ship_model, self.assets[1].ship_model)
+            return {
+                'encounter_range': float(encounter[0]),
+                'relative_bearing': float(encounter[1]),
+                'dcpa': float(encounter[2]),
+                'tcpa': float(encounter[3]),
+            }
+        return {}
 
     def _denormalize_action(self, action_norm):
         """
@@ -384,6 +510,8 @@ class SeaEnvASTv2(gym.Env):
             "wind"                  : self._denormalize(observation_norm["wind"], self.wind_range["min"], self.wind_range["max"]),
             "current"               : self._denormalize(observation_norm["current"], self.current_range["min"], self.current_range["max"])
         }
+        if "encounter" in observation_norm:
+            observation["encounter"] = self._denormalize(observation_norm["encounter"], self.encounter_range["min"], self.encounter_range["max"])
         
         return observation
     
@@ -398,6 +526,8 @@ class SeaEnvASTv2(gym.Env):
             "wind"                  : self._normalize(observation["wind"], self.wind_range["min"], self.wind_range["max"]),
             "current"               : self._normalize(observation["current"], self.current_range["min"], self.current_range["max"])
         }
+        if "encounter" in observation:
+            observation_norm["encounter"] = self._normalize(observation["encounter"], self.encounter_range["min"], self.encounter_range["max"])
         
         return observation_norm       
 
@@ -546,7 +676,7 @@ class SeaEnvASTv2(gym.Env):
         reward = base_reward
         
         ## Get the termination info of the own ship
-        collision           = self.assets[0].ship_model.stop_info['collision']
+        collision           = collision_flag(self.assets[0].ship_model.stop_info['collision'])
         grounding_failure   = self.assets[0].ship_model.stop_info['grounding_failure']
         navigation_failure  = self.assets[0].ship_model.stop_info['navigation_failure']
         reaches_endpoint    = self.assets[0].ship_model.stop_info['reaches_endpoint']
@@ -611,6 +741,8 @@ class SeaEnvASTv2(gym.Env):
         if self.wind_model:   self.wind_model.reset(seed=wind_seed)
         self._child_seeds = dict(wave=wave_seed, current=current_seed, wind=wind_seed)
             
+        route_files = None
+
         # Sample a random route for training during random training
         if self.random_route:
             if self.for_training:
@@ -637,13 +769,46 @@ class SeaEnvASTv2(gym.Env):
             route = str(route_files[idx])
             self._route_idx = idx  # (optional) keep for debugging
         
+        route_overrides = None
+        if route is not None and len(self.assets) == 2:
+            parallel_offset_m = float(getattr(self.args, 'parallel_offset_m', 0.0))
+            route_overrides = paired_reset_routes(route, lateral_offset_m=parallel_offset_m, map_obj=getattr(self, 'map', None))
+
+            if route_overrides is None:
+                if route_idx is not None:
+                    raise ValueError(
+                        f"Route index {route_idx} cannot support a parallel offset of {parallel_offset_m} m without entering land."
+                    )
+
+                if self.random_route and route_files is not None:
+                    for _ in range(max(0, len(route_files) - 1)):
+                        idx = int(self.np_random.integers(0, len(route_files)))
+                        route = str(route_files[idx])
+                        candidate_overrides = paired_reset_routes(
+                            route,
+                            lateral_offset_m=parallel_offset_m,
+                            map_obj=getattr(self, 'map', None),
+                        )
+                        if candidate_overrides is not None:
+                            route_overrides = candidate_overrides
+                            self._route_idx = idx
+                            break
+
+                if route_overrides is None:
+                    raise ValueError(
+                        f"Could not find a two-ship route pair with {parallel_offset_m} m parallel offset that stays out of land."
+                    )
+
         # Reset ships; pass seeds if supported
-        for asset in self.assets:
+        for asset_idx, asset in enumerate(self.assets):
+            ship_route = route
+            if route_overrides is not None:
+                ship_route = route_overrides[min(asset_idx, len(route_overrides) - 1)]
             if hasattr(asset.ship_model, "reset"):
                 try:
-                    asset.ship_model.reset(seed=int(self.np_random.integers(0, 2**31 - 1)), route=route)
+                    asset.ship_model.reset(seed=int(self.np_random.integers(0, 2**31 - 1)), route=ship_route)
                 except TypeError:
-                    asset.ship_model.reset(route=route)
+                    asset.ship_model.reset(route=ship_route)
 
             # restore info to initial values (deep-copied)
             init = asset.init_copy

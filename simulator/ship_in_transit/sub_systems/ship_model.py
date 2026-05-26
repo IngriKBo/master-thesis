@@ -926,17 +926,35 @@ class ShipModel(BaseShipModel):
 
         
     def sbmpc_colav_override(self, asset_infos):
+        if self.observer is not None and self.use_observer_for_control:
+            colav_north = float(self.estimated_north)
+            colav_east = float(self.estimated_east)
+            colav_yaw = float(self.estimated_heading)
+            # Prefer full observer state when available so SBMPC gets a consistent estimated velocity vector.
+            if hasattr(self.observer, 'x') and len(self.observer.x) >= 5:
+                colav_forward_speed = float(self.observer.x[3])
+                colav_sideways_speed = float(self.observer.x[4])
+            else:
+                colav_forward_speed = float(self.forward_speed)
+                colav_sideways_speed = float(self.sideways_speed)
+        else:
+            colav_north = float(self.north)
+            colav_east = float(self.east)
+            colav_yaw = float(self.yaw_angle)
+            colav_forward_speed = float(self.forward_speed)
+            colav_sideways_speed = float(self.sideways_speed)
+
         # Get desired heading and speed for collav
-        self.next_wpt, self.prev_wpt = self.auto_pilot.navigate.next_wpt(self.auto_pilot.next_wpt, self.north, self.east)
-        chi_d = self.auto_pilot.navigate.los_guidance(self.auto_pilot.next_wpt, self.north, self.east)
+        self.next_wpt, self.prev_wpt = self.auto_pilot.navigate.next_wpt(self.auto_pilot.next_wpt, colav_north, colav_east)
+        chi_d = self.auto_pilot.navigate.los_guidance(self.auto_pilot.next_wpt, colav_north, colav_east)
         u_d = self.desired_speed
 
         # Get OS state required for SBMPC
-        os_state = np.array([self.east,            # x
-                             self.north,           # y
-                            -self.yaw_angle,       # Same reference angle but clockwise positive
-                             self.forward_speed,   # u
-                             self.sideways_speed,  # v
+        os_state = np.array([colav_east,            # x
+                             colav_north,           # y
+                            -colav_yaw,            # Same reference angle but clockwise positive
+                             colav_forward_speed,  # u
+                             colav_sideways_speed, # v
                              self.yaw_rate         # Unused
                             ])
         
@@ -1127,10 +1145,13 @@ class ShipModel(BaseShipModel):
             self.simulation_results['estimated east [m]'].append(self.estimated_east)
             self.simulation_results['estimated speed [m/s]'].append(self.estimated_speed)
         else:
-            # ADDED/CHANGED: keep arrays aligned when no observer
-            self.simulation_results['estimated north [m]'].append(np.nan)
-            self.simulation_results['estimated east [m]'].append(np.nan)
-            self.simulation_results['estimated speed [m/s]'].append(np.nan)
+            self.estimated_north = float(self.north)
+            self.estimated_east = float(self.east)
+            self.estimated_heading = float(self.yaw_angle)
+            self.estimated_speed = float(np.hypot(self.forward_speed, self.sideways_speed))
+            self.simulation_results['estimated north [m]'].append(self.estimated_north)
+            self.simulation_results['estimated east [m]'].append(self.estimated_east)
+            self.simulation_results['estimated speed [m/s]'].append(self.estimated_speed)
         
         # Track the travel distance between route points
         self.track_travel_distance()
@@ -1159,8 +1180,9 @@ class ShipModel(BaseShipModel):
         # Initialize states based on auto pilot route
         if route is not None:
             # Route files are always east, north
-            E_0, N_0 = np.loadtxt(route)[0]  # east, north
-            E_1, N_1 = np.loadtxt(route)[1]
+            route_data = np.loadtxt(route) if isinstance(route, str) else np.asarray(route, dtype=float)
+            E_0, N_0 = route_data[0]  # east, north
+            E_1, N_1 = route_data[1]
             psi_0    = math.atan2((E_1 - E_0), (N_1 - N_0))
             self.north      = N_0
             self.east       = E_0
@@ -1179,6 +1201,12 @@ class ShipModel(BaseShipModel):
             self.observer.reset(x0=x0)
             self.estimated_north = float(self.north)
             self.estimated_east = float(self.east)
+            self.estimated_heading = float(self.yaw_angle)
+            self.estimated_speed = float(np.hypot(self.forward_speed, self.sideways_speed))
+        else:
+            self.estimated_north = float(self.north)
+            self.estimated_east = float(self.east)
+            self.estimated_heading = float(self.yaw_angle)
             self.estimated_speed = float(np.hypot(self.forward_speed, self.sideways_speed))
         
         # Reset the navigational failure parameter

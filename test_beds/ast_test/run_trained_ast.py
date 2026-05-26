@@ -1,36 +1,21 @@
 from pathlib import Path
 import sys
 
-## PATH HELPER (OBLIGATORY)
-# project root = two levels up from this file
+# Add the project root to sys.path.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-### IMPORT SIMULATOR ENVIRONMENTS
 from test_beds.ast_test.setup import get_env_assets
-
-## IMPORT FUNCTIONS
 from utils.animate import MapAnimator, PolarAnimator, animate_side_by_side
 from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
-
-## IMPORT AST RELATED TOOLS
 from stable_baselines3 import SAC
-from stable_baselines3.sac import MlpPolicy, MultiInputPolicy
-from gymnasium.wrappers import FlattenObservation, RescaleAction
-from gymnasium.utils.env_checker import check_env
-
-### IMPORT TOOLS
 import argparse
 import pandas as pd
 import os
-import time
-
-### IMPORT UTILS
 from utils.get_path import get_saved_model_path
-os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 def parse_cli_args():
-    # Argument Parser
     parser = argparse.ArgumentParser(description='Ship in Transit Simulation')
 
     ## Add arguments for environments
@@ -59,28 +44,16 @@ def parse_cli_args():
     parser.add_argument('--action_sampling_period', type=int, default=1800, metavar='ACT_SAMPLING_PERIOD',
                         help='AST: time period in second between policy - action sampling (default: 1800)')
 
-    # Parse args
-    args = parser.parse_args()
-    
-    return args
+    return parser.parse_args()
 
 if __name__ == "__main__":
-
-###################################### TRAIN THE MODEL #####################################
-
-    # Get the args
     args = parse_cli_args()
-    
-    # Get the assets and AST Environment Wrapper
+
     env, assets, map_gdfs = get_env_assets(args=args, print_ship_status=True)
-    
-    # Load the trained model
+
     saved_model_path = get_saved_model_path(root=ROOT, saved_model_filename="AST-train_3")
-    
-    # Load the trained model
     ast_model = SAC.load(saved_model_path)
-    
-    ## Run the trained model
+
     obs, info = env.reset()
     while True:
         action, _states = ast_model.predict(obs, deterministic=True)
@@ -89,39 +62,33 @@ if __name__ == "__main__":
         if terminated or truncated:
             break
         
-####################################### GET RESULTS ########################################
-
-    # Print RL transition
+    # Print the RL transition summary.
     env.log_RL_transition_text(train_time=None,
                         txt_path=None,
                         also_print=True)
 
-    ## Get the simulation results for all assets, and plot the asset simulation results
+    # Collect simulation results.
     own_ship_results_df = pd.DataFrame().from_dict(env.assets[0].ship_model.simulation_results)
     result_dfs = [own_ship_results_df]
 
-    # Build both animations (don’t show yet)
-    repeat=False
+    # Build both animations before showing them.
     map_anim = MapAnimator(
         assets=assets,
         map_gdfs=map_gdfs,
         interval_ms=500,
-        status_asset_index=0  # flags for own ship
+        status_asset_index=0,
     )
     map_anim.run(fps=120, show=False, repeat=False)
 
     polar_anim = PolarAnimator(focus_asset=assets[0], interval_ms=500)
     polar_anim.run(fps=120, show=False, repeat=False)
 
-    # Place windows next to each other, same height, centered
     animate_side_by_side(map_anim.fig, polar_anim.fig,
-                        left_frac=0.68,  # how wide the map window is
+                        left_frac=0.68,
                         height_frac=0.92,
                         gap_px=16,
                         show=True)
 
-    # Plot 1: Trajectory
     plot_ship_status(env.assets[0], own_ship_results_df, plot_env_load=True, show=False)
 
-    # Plot 2: Status plot
     plot_ship_and_real_map(assets, result_dfs, map_gdfs, show=True)

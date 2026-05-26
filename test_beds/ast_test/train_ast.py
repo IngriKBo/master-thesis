@@ -3,33 +3,23 @@ import numpy as np
 from pathlib import Path
 import sys
 
-## PATH HELPER (OBLIGATORY)
-# project root = two levels up from this file
+# Add the project root to sys.path.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-### IMPORT SIMULATOR ENVIRONMENTS
 from test_beds.ast_test.setup import get_env_assets
-
-## IMPORT FUNCTIONS
 from utils.animate import MapAnimator, PolarAnimator, animate_side_by_side
 from utils.plot_simulation import plot_ship_status, plot_ship_and_real_map
-
-## IMPORT AST RELATED TOOLS
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from gymnasium.utils.env_checker import check_env
-
-### IMPORT TOOLS
 import argparse
 import pandas as pd
 import os
 import time
-
-### IMPORT UTILS
 from utils.get_path import get_trained_model_and_log_path
 from utils.logger import log_ast_training_config
-os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 SCENARIO_MODEL_NAMES = {
@@ -37,6 +27,7 @@ SCENARIO_MODEL_NAMES = {
     'observer_two_ships': 'AST-observer-two-ships-train',
     'observer_noise': 'AST-observer-noise-one-ship-train',
     'observer_noise_two_ships': 'AST-observer-noise-two-ships-train',
+    'observer_noise_two_ships_extreme': 'AST-observer-noise-two-ships-extreme-train',
 }
 
 
@@ -68,7 +59,6 @@ class PercentProgressCallback(BaseCallback):
 
 
 def parse_cli_args():
-    # Argument Parser
     parser = argparse.ArgumentParser(description='Ship in Transit Simulation')
 
     ## Add arguments for environments
@@ -115,14 +105,29 @@ def parse_cli_args():
     parser.add_argument('--measurement_noise_penalty_deadband', type=float, nargs=4,
                         default=[0.05, 0.05, 0.05, 0.08], metavar=('POS', 'YAW', 'SPEED', 'BIAS'),
                         help='Per-channel deadband around nominal measurement noise before penalties start (default: 0.05 0.05 0.05 0.08)')
+    parser.add_argument('--two_ship_noise_max_scale', type=float, default=5.0,
+                        help='Regular two ship measurement noise env: max allowed noise scaling per channel (default: 5.0)')
+    parser.add_argument('--two_ship_realistic_noise_upper', type=float, nargs=4,
+                        default=[2.0, 2.0, 2.0, 2.5], metavar=('POS', 'YAW', 'SPEED', 'BIAS'),
+                        help='Regular two ship measurement noise env: realism band upper bounds used in the penalty logic (default: 2.0 2.0 2.0 2.5)')
+    parser.add_argument('--extreme_noise_max_scale', type=float, default=20.0,
+                        help='Extreme env: maximum measurement-noise scaling allowed per channel (default: 20.0)')
+    parser.add_argument('--extreme_action_gain', type=float, default=1.5,
+                        help='Extreme env: gain applied to normalized policy action before clipping to [-1, 1] (default: 1.5)')
+    parser.add_argument('--extreme_noise_threshold', type=float, default=2.0,
+                        help='Extreme env: threshold where extra extreme-load reward starts (default: 2.0)')
+    parser.add_argument('--extreme_linear_scale_penalty_gain', type=float, default=0.001,
+                        help='Extreme env: linear per-step penalty gain for scaling above nominal (default: 0.001)')
+    parser.add_argument('--extreme_cumulative_linear_scale_penalty_gain', type=float, default=0.00001,
+                        help='Extreme env: cumulative linear penalty gain for scaling above nominal (default: 0.00001)')
     parser.add_argument('--close_reward_distance', type=float, default=120.0,
                         help='Optional immediate proximity reward decay distance in meters for measurement-noise scenarios (default: 120.0)')
     parser.add_argument('--close_reward_gain', type=float, default=0.0,
                         help='Optional immediate proximity reward gain for measurement-noise scenarios (default: 0.0)')
     parser.add_argument('--collision_reward', type=float, default=120.0,
                         help='Additional collision reward in two-ship measurement-noise scenarios (default: 120.0)')
-    parser.add_argument('--dcpa_reward_gain', type=float, default=20.0,
-                        help='Two-ship DCPA/TCPA encounter reward gain for measurement-noise scenarios (default: 20.0)')
+    parser.add_argument('--dcpa_reward_gain', type=float, default=30.0,
+                        help='Two-ship DCPA/TCPA encounter reward gain for measurement-noise scenarios (default: 30.0)')
     parser.add_argument('--dcpa_reward_distance', type=float, default=120.0,
                         help='Distance threshold in meters where low DCPA starts to be strongly rewarded (default: 120.0)')
     parser.add_argument('--tcpa_reward_horizon', type=float, default=900.0,
@@ -136,29 +141,19 @@ def parse_cli_args():
     parser.add_argument('--fixed_training_route', action='store_true',
                         help='Disable random route sampling during training and keep the factory default route setup')
 
-    # Add argument for scenario
     parser.add_argument('--scenario', type=str, default='observer_two_ships', metavar='SCENARIO',
-                        help='Scenario to train on: estimator_tuning, measurement_noise, estimator_tuning_two_ships, measurement_noise_two_ships, wave, or legacy aliases such as observer_noise_two_ships (default: observer_two_ships)')
+                        help='Scenario to train on: estimator_tuning, measurement_noise, estimator_tuning_two_ships, measurement_noise_two_ships, measurement_noise_two_ships_extreme, wave, or legacy aliases such as observer_noise_two_ships (default: observer_two_ships)')
 
-    # Parse args
-    args = parser.parse_args()
-    return args
+    return parser.parse_args()
 
 if __name__ == "__main__":
-
-
-    ###################################### TRAIN THE MODEL #####################################
-
-
-    # Get the args
     args = parse_cli_args()
 
-
-    # Create unique output paths under trained_model/
+    # Create unique output paths under trained_model.
     model_name = resolve_model_name(args)
     model_path, log_path, tb_path = get_trained_model_and_log_path(root=ROOT, model_name=model_name)
 
-    # Get the assets and AST Environment Wrapper, scenario from args
+    # Build the requested environment.
     env, assets, map_gdfs = get_env_assets(args=args, scenario=args.scenario)
 
     # Make route sampling for training explicit instead of relying on env defaults.
@@ -173,10 +168,10 @@ if __name__ == "__main__":
         print('Training route mode : fixed default trajectory')
 
     # Abort early if the selected environment does not match the intended AST scenarios.
-    if type(env).__name__ not in ["SeaEnvEstimatorTuningAST", "SeaEnvMeasurementNoiseAST", "TwoShipsEstimatorTuningEnv", "TwoShipsMeasurementNoiseEnv"]:
+    if type(env).__name__ not in ["SeaEnvEstimatorTuningAST", "SeaEnvMeasurementNoiseAST", "TwoShipsEstimatorTuningEnv", "TwoShipsMeasurementNoiseEnv", "TwoShipsMeasurementNoiseExtremeEnv"]:
         raise RuntimeError(
             f"Wrong environment selected: {type(env).__name__}. "
-            "Expected SeaEnvEstimatorTuningAST, SeaEnvMeasurementNoiseAST, TwoShipsEstimatorTuningEnv or TwoShipsMeasurementNoiseEnv."
+            "Expected SeaEnvEstimatorTuningAST, SeaEnvMeasurementNoiseAST, TwoShipsEstimatorTuningEnv, TwoShipsMeasurementNoiseEnv or TwoShipsMeasurementNoiseExtremeEnv."
         )
     if env.assets[0].ship_model.observer is None:
         raise RuntimeError("Observer is not attached to ship model. Aborting observer-scenario training.")
@@ -194,7 +189,7 @@ if __name__ == "__main__":
         print(f"Environment has issues: {e}")
         if args.strict_env_check:
             print("ABORT TRAINING (strict env check enabled)")
-            sys.exit(1)  # non-zero exit code stopper scriptet
+            sys.exit(1)
         print("Continuing training (strict env check disabled).")
 
     # Log the training configuration and resolved environment class.

@@ -22,6 +22,12 @@ import json
 
 import copy
 
+
+def collision_flag(collision_info):
+    if isinstance(collision_info, (list, tuple)) and len(collision_info) > 0:
+        return bool(collision_info[0])
+    return bool(collision_info)
+
 @dataclass
 class AssetInfo:
     # dynamic state (mutable)
@@ -465,7 +471,7 @@ class SeaEnvAST(gym.Env):
         reward = len(self.action_list) * 5.0
         
         ## Get the termination info of the own ship
-        collision           = self.assets[0].ship_model.stop_info['collision']
+        collision           = collision_flag(self.assets[0].ship_model.stop_info['collision'])
         grounding_failure   = self.assets[0].ship_model.stop_info['grounding_failure']
         navigation_failure  = self.assets[0].ship_model.stop_info['navigation_failure']
         reaches_endpoint    = self.assets[0].ship_model.stop_info['reaches_endpoint']

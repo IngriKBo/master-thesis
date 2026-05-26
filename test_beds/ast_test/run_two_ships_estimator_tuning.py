@@ -24,12 +24,13 @@ def resolve_model_path(cli_model_path, model_prefix):
         return str(Path(cli_model_path))
 
     trained_model_root = ROOT / 'trained_model'
-    candidates = sorted(trained_model_root.glob(f'{model_prefix}*/model.zip'))
+    candidates = list(trained_model_root.glob(f'{model_prefix}*/model.zip'))
     if not candidates:
         raise FileNotFoundError(
             f'No trained model found for prefix {model_prefix}. Provide --model_path explicitly.'
         )
-    return str(candidates[-1])
+    latest_model = max(candidates, key=lambda p: p.stat().st_mtime)
+    return str(latest_model)
 
 
 def summarize_stop_info(ship):

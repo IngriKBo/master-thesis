@@ -7,7 +7,7 @@ import numpy as np
 
 from gymnasium.spaces import Box
 
-from env_wrappers.sea_env_ast_v2.env import SeaEnvASTv2
+from env_wrappers.sea_env_ast_v2.env import SeaEnvASTv2, collision_flag
 
 
 class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
@@ -20,12 +20,23 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
       - alpha_q       : scale for process covariance (Q)
     """
     def init_action_space(self):
+        configured_bounds_profile = getattr(self.args, "estimator_tuning_bounds_profile", "legacy")
+        bounds_profile = str(configured_bounds_profile).strip().lower()
+        if bounds_profile not in {"legacy", "realistic"}:
+            raise ValueError(
+                f"Unknown estimator tuning bounds profile '{configured_bounds_profile}'. "
+                "Expected 'legacy' or 'realistic'."
+            )
+
+        self.estimator_tuning_bounds_profile = bounds_profile
+        tuning_lower, tuning_upper = (0.2, 5.0) if bounds_profile == "legacy" else (0.5, 2.0)
+
         # Action controls normalized covariance multipliers in [-1, 1].
         self.obs_tuning_range = {
-            "r_pos": np.array([0.2, 5.0], dtype=np.float32),
-            "r_yaw": np.array([0.2, 5.0], dtype=np.float32),
-            "r_speed": np.array([0.2, 5.0], dtype=np.float32),
-            "q": np.array([0.2, 5.0], dtype=np.float32)
+            "r_pos": np.array([tuning_lower, tuning_upper], dtype=np.float32),
+            "r_yaw": np.array([tuning_lower, tuning_upper], dtype=np.float32),
+            "r_speed": np.array([tuning_lower, tuning_upper], dtype=np.float32),
+            "q": np.array([tuning_lower, tuning_upper], dtype=np.float32)
         }
         self.obs_tuning_nominal = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
         self.obs_tuning_prev = self.obs_tuning_nominal.copy()
@@ -35,9 +46,15 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
         )
         # Track cumulative observer tuning (noise) for the episode
         self.cumulative_noise = 0.0
+        # Encourage temporary aggressive tuning bursts, but penalize sustained high tuning.
+        self.high_tuning_threshold = 1.80 if bounds_profile == "legacy" else 1.35
+        self.last_high_tuning_load = 0.0
+        self.last_high_tuning_burst = 0.0
+        self.cumulative_high_tuning_load = 0.0
+        self.high_tuning_streak = 0.0
 
 
-    # _clip_tuning_step fjernet: ingen begrensning på endring per steg
+    # _clip_tuning_step was removed. Only range bounds are enforced.
 
     def _denormalize_action(self, action_norm):
         action_arr = np.asarray(action_norm, dtype=np.float32).reshape(-1)
@@ -59,7 +76,7 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
         return a0, a1, a2, a3
 
     def _apply_observer_tuning(self, action):
-        # Ingen begrensning på endring per steg, kun range
+        # No per-step change limit. Only range bounds are enforced.
         action_arr = np.asarray(action, dtype=np.float32)
         low = np.array([
             self.obs_tuning_range["r_pos"][0],
@@ -74,10 +91,22 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
             self.obs_tuning_range["q"][1]
         ], dtype=np.float32)
         clipped = np.clip(action_arr, low, high)
+        prev_tuning = self.obs_tuning_prev.copy()
         # Calculate cumulative tuning change (|a_t - a_{t-1}|)
-        tuning_change = np.sum(np.abs(clipped - self.obs_tuning_prev))
+        tuning_change = np.sum(np.abs(clipped - prev_tuning))
         self.cumulative_noise += tuning_change
         self.obs_tuning_prev = clipped.copy()
+
+        high_now = np.maximum(clipped - self.high_tuning_threshold, 0.0)
+        high_prev = np.maximum(prev_tuning - self.high_tuning_threshold, 0.0)
+        self.last_high_tuning_load = float(np.sum(high_now))
+        self.last_high_tuning_burst = float(np.sum(np.maximum(high_now - high_prev, 0.0)))
+        self.cumulative_high_tuning_load += self.last_high_tuning_load
+        if self.last_high_tuning_load > 0.0:
+            self.high_tuning_streak += 1.0
+        else:
+            self.high_tuning_streak = max(0.0, self.high_tuning_streak - 1.0)
+
         alpha_r_pos, alpha_r_yaw, alpha_r_speed, alpha_q = tuple(float(value) for value in clipped)
         self._require_observer_attached()
         observer = self.assets[0].ship_model.observer
@@ -90,7 +119,9 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
 
         # Apply tunings (keep matrices diagonal/positive)
         observer.Q = observer.Q_nominal * float(alpha_q)
-        assert hasattr(observer.Q, 'ndim') and observer.Q.ndim == 2, f"observer.Q har feil dimensjon: {getattr(observer.Q, 'shape', None)}"
+        assert hasattr(observer.Q, 'ndim') and observer.Q.ndim == 2, (
+            f"observer.Q has the wrong shape: {getattr(observer.Q, 'shape', None)}"
+        )
         observer.R = observer.R_nominal.copy()
         observer.R[0, 0] = observer.R_nominal[0, 0] * float(alpha_r_pos)
         observer.R[1, 1] = observer.R_nominal[1, 1] * float(alpha_r_pos)
@@ -131,6 +162,10 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
 
         # Reset cumulative noise at the start of each episode
         self.cumulative_noise = 0.0
+        self.last_high_tuning_load = 0.0
+        self.last_high_tuning_burst = 0.0
+        self.cumulative_high_tuning_load = 0.0
+        self.high_tuning_streak = 0.0
 
         return super().reset(seed=seed, options=options, route_idx=route_idx)
 
@@ -191,7 +226,12 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
                         speed_tol_mps=1.2,
                         pos_err_penalty=0.0002,
                         speed_err_penalty=0.05,
-                        cumulative_noise_penalty=0.2):
+                        cumulative_noise_penalty=0.06,
+                        high_tuning_burst_reward=1.10,
+                        sustained_high_penalty=0.28,
+                        streak_penalty_gain=0.22,
+                        streak_penalty_start=2.0,
+                        action_change_penalty=0.02):
         # Reward based on progress + gradual path-deviation reward + realism penalty
         base_reward = len(self.action_list) * eta * theta
         reward = base_reward
@@ -217,10 +257,17 @@ class SeaEnvEstimatorTuningAST(SeaEnvASTv2):
         reward -= pos_err_penalty * max(0.0, pos_err - pos_tol_m)**2
         reward -= speed_err_penalty * max(0.0, speed_err - speed_tol_mps)**2
 
-        # Penalize cumulative noise (sum of all tuning deviations so far)
+        # Encourage temporary high-value bursts, but discourage keeping high tuning for long.
+        reward += high_tuning_burst_reward * self.last_high_tuning_burst
+        reward -= sustained_high_penalty * self.cumulative_high_tuning_load
+        excess_high_streak = max(0.0, self.high_tuning_streak - streak_penalty_start)
+        reward -= streak_penalty_gain * (excess_high_streak ** 2)
+
+        # Keep some cost for excessive jitter and cumulative tuning changes.
+        reward -= action_change_penalty * float(np.sum(np.abs(np.asarray(action) - self.obs_tuning_nominal)))
         reward -= cumulative_noise_penalty * self.cumulative_noise
 
-        collision = self.assets[0].ship_model.stop_info['collision']
+        collision = collision_flag(self.assets[0].ship_model.stop_info['collision'])
         grounding_failure = self.assets[0].ship_model.stop_info['grounding_failure']
         navigation_failure = self.assets[0].ship_model.stop_info['navigation_failure']
         reaches_endpoint = self.assets[0].ship_model.stop_info['reaches_endpoint']

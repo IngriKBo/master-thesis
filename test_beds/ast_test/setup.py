@@ -1,16 +1,15 @@
 from pathlib import Path
 import sys
 
-## PATH HELPER (OBLIGATORY)
-# project root = two levels up from this file
+# Add the project root to sys.path.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-### IMPORT SIMULATOR ENVIRONMENTS
 from env_wrappers.sea_env_ast_v2.env import AssetInfo, ShipAsset, SeaEnvASTv2, choose_parallel_route
 from env_wrappers.sea_env_ast_v2.estimator_tuning_env import SeaEnvEstimatorTuningAST
 from env_wrappers.sea_env_ast_v2.measurement_noise_env import SeaEnvMeasurementNoiseAST
 from env_wrappers.sea_env_ast_v2.two_ships_measurement_noise_env import TwoShipsMeasurementNoiseEnv
+from env_wrappers.sea_env_ast_v2.two_ships_measurement_noise_extreme_env import TwoShipsMeasurementNoiseExtremeEnv
 from env_wrappers.sea_env_ast_v2.two_ships_estimator_tuning_env import TwoShipsEstimatorTuningEnv
 from env_wrappers.sea_env_ast_v1.env import SeaEnvAST
 
@@ -28,11 +27,10 @@ from simulator.ship_in_transit.sub_systems.observers import ShipObserverEKF
 from utils.get_path import get_ship_route_path, get_map_path
 from utils.prepare_map import get_gdf_from_gpkg, get_polygon_from_gdf
 
-### IMPORT TOOLS
 from typing import List
 import numpy as np
 import os
-os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 DEFAULT_OBSERVER_NOISE_PROFILE = 'realistic'
@@ -75,6 +73,7 @@ ENVIRONMENT_SCENARIOS = {
     'estimator_tuning': SeaEnvEstimatorTuningAST,
     'measurement_noise': SeaEnvMeasurementNoiseAST,
     'measurement_noise_two_ships': TwoShipsMeasurementNoiseEnv,
+    'measurement_noise_two_ships_extreme': TwoShipsMeasurementNoiseExtremeEnv,
     'estimator_tuning_two_ships': TwoShipsEstimatorTuningEnv,
     'wave': SeaEnvAST,
     # Add more scenarios here: 'scenario_name': EnvironmentClass
@@ -86,6 +85,7 @@ SCENARIO_ALIASES = {
     'passive_two_ships': 'nominal_two_ships',
     'observer_two_ships': 'estimator_tuning_two_ships',
     'observer_noise_two_ships': 'measurement_noise_two_ships',
+    'observer_noise_two_ships_extreme': 'measurement_noise_two_ships_extreme',
 }
 
 def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
@@ -109,10 +109,8 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
     
     env_class = ENVIRONMENT_SCENARIOS[scenario]
 
-    # -----------------------
-    # GPKG settings (edit if your layer names differ)
-    # -----------------------
-    GPKG_PATH   = get_map_path(ROOT, args.map_gpkg_filename)       # <-- put your file here (or absolute path)
+    # GPKG settings.
+    GPKG_PATH   = get_map_path(ROOT, args.map_gpkg_filename)
     FRAME_LAYER = "frame_3857"
     OCEAN_LAYER = "ocean_3857"
     LAND_LAYER  = "land_3857"
@@ -122,8 +120,8 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
     frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf = get_gdf_from_gpkg(GPKG_PATH, FRAME_LAYER, OCEAN_LAYER, LAND_LAYER, COAST_LAYER, WATER_LAYER)
     map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
 
-    map_data = get_polygon_from_gdf(land_gdf)   # list of exterior rings (E,N)
-    map = [PolygonObstacle(map_data), frame_gdf]              # <-- reuse your existing simulator map type
+    map_data = get_polygon_from_gdf(land_gdf)
+    map = [PolygonObstacle(map_data), frame_gdf]
 
     # Engine configuration
     main_engine_capacity = 2160e3 #4160e3
@@ -261,11 +259,10 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         kp_ship_speed=2.50, ki_ship_speed=0.025, kp_shaft_speed=0.05, ki_shaft_speed=0.0001
     )
 
-    passive_nominal_heading_controller_gains = HeadingControllerGains(kp=1.5, kd=75, ki=0.005)
-    conservative_observer_ship = scenario == 'measurement_noise_two_ships'
+    passive_nominal_heading_controller_gains = HeadingControllerGains(kp=1.5, kd=66, ki=0.005)
     own_ship_heading_controller_gains = (
         passive_nominal_heading_controller_gains
-        if scenario == 'nominal_two_ships' or conservative_observer_ship
+        if scenario in {'nominal_two_ships', 'measurement_noise_two_ships', 'measurement_noise_two_ships_extreme', 'estimator_tuning_two_ships'}
         else HeadingControllerGains(kp=1.5, kd=0, ki=0.00)
     )
     own_ship_los_guidance_parameters = LosParameters(
@@ -274,7 +271,11 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         integral_gain=0.002,
         integrator_windup_limit=4000
     )
-    own_ship_desired_speed = 4.0 if scenario == 'nominal_two_ships' or conservative_observer_ship else 4.5
+    own_ship_desired_speed = (
+        4.0
+        if scenario == 'nominal_two_ships'
+        else 4.5
+    )
     own_ship_cross_track_error_tolerance = 750
     own_ship_initial_propeller_shaft_speed = 0
     own_ship_initial_propeller_shaft_acceleration = 0
@@ -309,7 +310,7 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
         own_ship.auto_pilot.navigate.north = own_route_data[:, 1].tolist()
 
     # Attach EKF observer when training/evaluating observer scenarios
-    if scenario in ['estimator_tuning', 'measurement_noise', 'estimator_tuning_two_ships', 'measurement_noise_two_ships']:
+    if scenario in ['estimator_tuning', 'measurement_noise', 'estimator_tuning_two_ships', 'measurement_noise_two_ships', 'measurement_noise_two_ships_extreme']:
         observer_noise_cfg = get_observer_noise_config(
             getattr(args, 'observer_noise_profile', DEFAULT_OBSERVER_NOISE_PROFILE)
         )
@@ -355,7 +356,7 @@ def get_env_assets(args, print_ship_status=False, scenario='estimator_tuning'):
 
     # Package the assets for reinforcement learning agent
 
-    if scenario in ['nominal_two_ships', 'measurement_noise_two_ships', 'estimator_tuning_two_ships']:
+    if scenario in ['nominal_two_ships', 'measurement_noise_two_ships', 'measurement_noise_two_ships_extreme', 'estimator_tuning_two_ships']:
         route2_filename = 'Stangvik_AST.txt'
         route2_path = get_ship_route_path(ROOT, route2_filename)
         route2_data = np.loadtxt(route2_path)

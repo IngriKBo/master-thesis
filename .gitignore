@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+trained_model/
+saved_model/
+
+test_beds/ast_test/.multi_progress_check.txt

@@ -1,9 +1,7 @@
 from pathlib import Path
 import sys
-import geopandas as gpd
 
-## PATH HELPER (OBLIGATORY)
-# project root = two levels up from this file
+# Add the project root to sys.path.
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -66,10 +64,8 @@ parser.add_argument('--action_sampling_period', default=1800, metavar='ACT_SAMPL
 
 args = parser.parse_args()
 
-# -----------------------
-# GPKG settings (edit if your layer names differ)
-# -----------------------
-GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")       # <-- put your file here (or absolute path)
+# GPKG settings.
+GPKG_PATH   = get_map_path(ROOT, "Stangvik.gpkg")
 FRAME_LAYER = "frame_3857"
 OCEAN_LAYER = "ocean_3857"
 LAND_LAYER  = "land_3857"
@@ -79,8 +75,8 @@ WATER_LAYER = "water_3857"               # optional
 frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf = get_gdf_from_gpkg(GPKG_PATH, FRAME_LAYER, OCEAN_LAYER, LAND_LAYER, COAST_LAYER, WATER_LAYER)
 map_gdfs = frame_gdf, ocean_gdf, land_gdf, coast_gdf, water_gdf
 
-map_data = get_polygon_from_gdf(land_gdf)   # list of exterior rings (E,N)
-map = [PolygonObstacle(map_data), frame_gdf]              # <-- reuse your existing simulator map type
+map_data = get_polygon_from_gdf(land_gdf)
+map = [PolygonObstacle(map_data), frame_gdf]
 
 # Engine configuration
 main_engine_capacity = 2160e3 #4160e3
